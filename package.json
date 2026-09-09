@@ -1,0 +1,9 @@
+{
+  "name": "openfield",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck"
+  }
+}
