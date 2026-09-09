@@ -71,7 +71,7 @@ entry_hash   TEXT     SHA-256(seq ‖ prev_hash ‖ ts ‖ actor ‖ action ‖ 
 
 ### 2.2 action 类型
 
-`INGEST_ARTIFACT`（登记采集物）/ `CREATE_EVENT` / `CREATE_ENCOUNTER` / `CONSENT_RECORDED` / `MEMO_CONFIRM`（AI 或规则草稿经人工确认）/ `EXPORT` / `TIME_SYNC`。
+`INGEST_ARTIFACT`（登记采集物）/ `CREATE_EVENT` / `CREATE_ENCOUNTER` / `CONSENT_RECORDED` / `MEMO_CONFIRM`（AI 或规则草稿经人工确认）/ `EXPORT` / `TIME_SYNC` / `PURGE_SUBJECT`（PIPL 删除：只记录删除事实与范围，不含已删内容）。
 
 ### 2.3 原始件封存
 
@@ -85,7 +85,7 @@ entry_hash   TEXT     SHA-256(seq ‖ prev_hash ‖ ts ‖ actor ‖ action ‖ 
 
 ### 2.5 引用 ID
 
-格式 `OF-YYYYMMDD-CCC-NNN#Tmmss`（日期-城市码-序号#录音内时间点），P1 即实现标准学术引用生成（含证据哈希，审稿人可验证）。
+格式 `OF-YYYYMMDD-CCC-NNN#Tmmss`（日期-城市码-序号#录音内时间点）。城市码为 3 位字母，维护在 FieldEvent 上（用户创建 Event 时选择或新建），引用 ID 从所属 Event 继承。P1 即实现标准学术引用生成（含证据哈希，审稿人可验证）。
 
 ## 3. 数据模型（P1）
 
@@ -97,11 +97,11 @@ README 六实体全保留（FieldEvent / Encounter / Artifact / Participant / Ev
 | InboxItem | 导入暂存区：待归类文件 → 人工确认归属 Event/Encounter 后才正式 INGEST |
 | TimeSyncRecord | NTP 校验记录（同时入链） |
 
-匿名化：`real_name` 只存独立表 `participant_identity`；分析层查询与 UI 默认不 JOIN 此表。PIPL 删除权：按 pseudonym 级联清除该受访者全部数据，删除操作本身作为 `EXPORT` 类别的脱敏记录留痕（记录"删了什么类别"，不含已删内容）。
+匿名化：`real_name` 只存独立表 `participant_identity`；分析层查询与 UI 默认不 JOIN 此表。PIPL 删除权：按 pseudonym 级联清除该受访者全部数据，删除操作本身以 `PURGE_SUBJECT` 入链留痕（只记录删除事实与范围，不含已删内容）。
 
 ## 4. 导入流（P1 主工作流）
 
-1. 三个来源汇入导入目录：手机 bundle（iCloud Drive/OpenField/bundles/）、iCloud 回流的录音/照片、手动拖入或指向的文件夹。
+1. 三个来源汇入导入目录：手机 bundle（iCloud Drive/OpenField/bundles/）、iCloud 回流的录音/照片、手动拖入或指向的文件夹。P1 bundle 不做密码学签名：完整性由 ingest 时哈希登记建立，schema 校验失败的进隔离区。
 2. InboxWatcher 发现文件 → 按"时间窗口 ±2h + EXIF GPS"规则聚类，提示归属到哪个 FieldEvent / Encounter，人工确认。
 3. 确认后 IngestService 单事务完成：算 SHA-256 → 存 originals → 写 Artifact → 写 EvidenceLog。
 4. 幂等：同哈希文件重复出现 → 跳过并提示，绝不二次登记。
