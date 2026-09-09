@@ -1,0 +1,48 @@
+name: Bug Report 缺陷报告
+description: Behavior against the spec or the principles. 行为不符合规范或原则。
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issues never go here — use Private Vulnerability Reporting (see SECURITY.md).
+        安全问题严禁公开发帖——请使用私密漏洞报告（见 SECURITY.md）。
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened 发生了什么
+      description: Actual vs. expected behavior. 实际行为与预期行为。
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction 复现步骤
+      description: Steps, with field conditions — offline? network? device? 复现步骤，请附田野环境（是否离线、网络与设备状况）。
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area 涉及区域
+      options:
+        - Data capture 数据采集
+        - Consent & privacy 同意与隐私
+        - Storage & sync 存储与同步
+        - AI integration AI 集成
+        - Export & citations 导出与引用
+        - UI & copy 界面与文案
+        - Other 其他
+    validations:
+      required: true
+  - type: checkboxes
+    id: stakes
+    attributes:
+      label: Stakes 原则风险
+      options:
+        - label: May violate a non-negotiable (PRINCIPLES.md §2) — explain below 可能违反不可妥协项（PRINCIPLES.md 第 2 节），请在下方说明
+        - label: Participant data may be at risk 可能危及受访者数据
+  - type: textarea
+    id: extra
+    attributes:
+      label: Context 补充

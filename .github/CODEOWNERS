@@ -1,0 +1,6 @@
+# Default: everything routes to the maintainer 默认：全部变更路由至维护者
+*                           @allengaller
+
+# The constitution and the ethics gate are always maintainer-owned 宪法与伦理门槛始终归维护者所有
+/PRINCIPLES.md              @allengaller
+/docs/ETHICS_CHECKLIST.md   @allengaller

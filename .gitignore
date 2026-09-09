@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Build artifacts
+node_modules/
+dist/
+coverage/
+*.log
+
+# Session / tooling artifacts
+.qoder/
+
+# Downloaded third-party reference files (personal-use only, see references/INDEX.md)
+docs/fieldwork/references/*.pdf
+docs/fieldwork/references/*.txt
+docs/fieldwork/references/*.html
+
+# Root-level scratch downloads (same personal-use policy)
+/oro49592*

@@ -1,0 +1,46 @@
+name: Feature Proposal 功能提案
+description: A capability traced to a real field problem. 从真实田野问题出发的能力提案。
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Features must trace to a field problem, not a demo impulse. If this touches data handling, AI, or participant-facing flows, state which principles apply — the ethics lens comes before design.
+        功能必须能追溯到田野问题，而非演示冲动。若涉及数据处理、AI 或受访者可见流程，请写明相关原则——伦理视角先于设计。
+  - type: textarea
+    id: problem
+    attributes:
+      label: The field problem 田野问题
+      description: What happens in the field today, without this. 没有它，现在的田野现场会发生什么。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed capability 提案内容
+    validations:
+      required: true
+  - type: checkboxes
+    id: touches
+    attributes:
+      label: Touches 触及范围
+      options:
+        - label: Data handling 数据处理
+        - label: AI integration AI 集成
+        - label: User-facing copy 用户可见文案
+  - type: textarea
+    id: principles
+    attributes:
+      label: Principles 相关原则
+      description: Which PRINCIPLES.md clauses apply and how the design honors them. 相关条款及设计如何满足。
+  - type: dropdown
+    id: offline
+    attributes:
+      label: Offline availability 离线可用性
+      description: PRINCIPLES.md §2.2 — core functionality must work with no signal. 第 2.2 节——核心功能必须断网可用。
+      options:
+        - Fully offline 完全离线可用
+        - Partially offline 部分离线可用
+        - Requires network 需要网络
+    validations:
+      required: true

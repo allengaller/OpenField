@@ -1,0 +1,34 @@
+name: Principle Discussion 原则讨论
+description: Debate a clause of PRINCIPLES.md, or propose an amendment. 辩论宪法条款，或提出修订。
+labels: ["principles"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Debating principles is welcome; silently violating them is not. Constitutional amendments need the maintainer's approval and a bilingual diff.
+        我们欢迎对原则的辩论，但不接受对原则的无声违背。修订宪法需维护者批准，并附双语对照的修订文本。
+  - type: textarea
+    id: clause
+    attributes:
+      label: Clause 条款
+      description: e.g. §2.4 Ethics & Compliance as Infrastructure. 例：第 2.4 节 伦理即基础设施。
+    validations:
+      required: true
+  - type: textarea
+    id: tension
+    attributes:
+      label: The tension 冲突所在
+      description: What this clause collides with — a scenario, a cost, or another principle. 该条款与什么相冲突——场景、代价，或另一条原则。
+    validations:
+      required: true
+  - type: textarea
+    id: amendment
+    attributes:
+      label: Proposed amendment 修订提案
+      description: Bilingual (English + 中文) replacement text, if you propose one. 若提议修订，请给出双语替换文本。
+  - type: checkboxes
+    id: amend
+    attributes:
+      label: Intent 意图
+      options:
+        - label: I propose amending PRINCIPLES.md 我提议修订 PRINCIPLES.md
