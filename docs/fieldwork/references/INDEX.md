@@ -4,7 +4,7 @@
 >
 > 生成：2026-09-09。每份文件标注来源与授权状态。
 
-## 一、本地已有（8 份）
+## 一、本地已有（10 份）
 
 | 文件 | 内容 | 来源 URL | 授权状态 | 服务语料 |
 | --- | --- | --- | --- | --- |
@@ -15,6 +15,7 @@
 | `kozinets-2020-netnography-essential-guide-preview.pdf` | Kozinets《Netnography》第 3 版官方预览（含 p.15 定义，834KB） | [官方预览服务器](https://api.pageplace.de/preview/DT0400.9781526482365_A37042502/preview-9781526482365_A37042502.pdf) | 出版社官方预览 | [10 §3](../10-it-ux-applications.md) |
 | `peasant-life-in-china-1939.pdf` + `.txt` | 费孝通《江村经济》英文原著全文（31.9MB 扫描 + 528KB 文本，含马林诺夫斯基序言） | [archive.org](https://archive.org/details/in.ernet.dli.2015.76327) | 1939 年出版物，图书馆公有领域扫描 | [01 §4](../01-what-is-fieldwork.md) |
 | `eu-horizon-research-ethics-ethnography-anthropology.pdf` | 欧盟 Horizon 民族志研究伦理指引（1.3MB） | [ec.europa.eu](https://ec.europa.eu/info/funding-tenders/opportunities/docs/2021-2027/horizon/guidance/research-ethics-in-ethnography-anthropology_he_en.pdf) | 官方公开文件 | [07 §2](../07-ethics.md) |
+| `ryan-2017-origins-history-principles-ethnography.pdf` + `.txt` | Ryan (2017)《An introduction to the origins, history and principles of ethnography》全文（467KB PDF + 39KB 可检索文本） | [Open University 机构库 ORO](https://oro.open.ac.uk/49592/6/49592.pdf)（研究工作流核验环节获取的机构库副本） | 同行评审论文，仅限个人学习 | [01](../01-what-is-fieldwork.md)、[02](../02-schools.md)、[10 §1](../10-it-ux-applications.md) |
 
 ## 二、法规与中文文献（HTML，5 份）
 
@@ -30,7 +31,6 @@
 
 | 文献 | 状态 | 链接 |
 | --- | --- | --- |
-| Ryan (2017) 民族志起源与原理 | 机构库（ORO）防盗链，浏览器可开 | https://oro.open.ac.uk/49592/6/49592.pdf |
 | Aspers & Corte (2019) | PMC/Springer 均反爬，浏览器可开 | https://pmc.ncbi.nlm.nih.gov/articles/PMC6494783/ |
 | Nowell et al. (2017) | SAGE 反爬（GOLD 开放获取），浏览器可开 | https://journals.sagepub.com/doi/pdf/10.1177/1609406917733847 |
 | Braun & Clarke (2006) | 付费墙，DOI 页可看摘要 | https://doi.org/10.1191/1478088706qp063oa |
