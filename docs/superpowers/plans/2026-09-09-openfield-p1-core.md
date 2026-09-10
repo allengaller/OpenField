@@ -188,6 +188,7 @@ git commit -m "chore: scaffold pnpm monorepo with @openfield/core skeleton"
 import { describe, it, expect } from 'vitest';
 import {
   CityCode, FieldEvent, Encounter, Artifact, Participant, EvidenceEntry, ConsentRecord,
+  Memo, InboxItem, TimeSyncRecord,
 } from '../src/entities';
 
 const validEvent = {
@@ -205,6 +206,9 @@ describe('FieldEvent', () => {
   });
   it('拒绝非法日期', () => {
     expect(FieldEvent.safeParse({ ...validEvent, date: '2026-9-9' }).success).toBe(false);
+  });
+  it('拒绝不存在的日历日期', () => {
+    expect(FieldEvent.safeParse({ ...validEvent, date: '2026-02-31' }).success).toBe(false);
   });
 });
 
@@ -233,6 +237,9 @@ describe('Artifact', () => {
   it('拒绝非法类型', () => {
     expect(Artifact.safeParse({ ...validArtifact, type: 'video' }).success).toBe(false);
   });
+  it('拒绝大写 sha256', () => {
+    expect(Artifact.safeParse({ ...validArtifact, sha256: 'A'.repeat(64) }).success).toBe(false);
+  });
 });
 
 describe('Encounter', () => {
@@ -255,6 +262,9 @@ describe('Participant 隐私边界', () => {
   it('strict 模式拒绝携带 real_name', () => {
     const withRealName = { pseudonym: 'P-001', real_name: '张三' };
     expect(Participant.safeParse(withRealName).success).toBe(false);
+  });
+  it('拒绝任何未知字段（含 camelCase realName）', () => {
+    expect(Participant.safeParse({ pseudonym: 'P-001', realName: '张三' }).success).toBe(false);
   });
   it('接受合法档案', () => {
     const p = { pseudonym: 'P-001', industry: '菌子批发', referralChain: ['P-002'] };
@@ -294,6 +304,52 @@ describe('ConsentRecord', () => {
   it('拒绝非法模板类型', () => {
     const c = { id: 'con-001', encounterId: 'enc-001', templateType: 'verbal_only', scope: 'x' };
     expect(ConsentRecord.safeParse(c).success).toBe(false);
+  });
+});
+
+describe('Memo', () => {
+  const validMemo = {
+    id: 'memo-001',
+    linkedArtifactIds: ['art-001'],
+    type: 'reflexive',
+    content: '第一天的反思笔记',
+    createdAt: 1757376000000,
+  };
+  it('接受合法备忘且 confirmedAt 缺省为 null', () => {
+    expect(Memo.parse(validMemo).confirmedAt).toBeNull();
+  });
+  it('拒绝非法备忘类型', () => {
+    expect(Memo.safeParse({ ...validMemo, type: 'rant' }).success).toBe(false);
+  });
+});
+
+describe('InboxItem', () => {
+  const validItem = {
+    id: 'inb-001',
+    sourcePath: '/Volumes/SD/IMG_0001.MP4',
+    detectedAt: 1757376000000,
+    status: 'pending',
+  };
+  it('接受合法收件项', () => {
+    expect(InboxItem.parse(validItem).status).toBe('pending');
+  });
+  it('拒绝非法状态', () => {
+    expect(InboxItem.safeParse({ ...validItem, status: 'done' }).success).toBe(false);
+  });
+});
+
+describe('TimeSyncRecord', () => {
+  const validSync = {
+    id: 'ts-001',
+    checkedAt: 1757376000000,
+    ntpServer: 'ntp.aliyun.com',
+    offsetMs: -350,
+  };
+  it('接受负时钟偏移', () => {
+    expect(TimeSyncRecord.parse(validSync).offsetMs).toBe(-350);
+  });
+  it('拒绝小数偏移', () => {
+    expect(TimeSyncRecord.safeParse({ ...validSync, offsetMs: 1.5 }).success).toBe(false);
   });
 });
 ```
@@ -344,9 +400,9 @@ export type Gps = z.infer<typeof Gps>;
 export const CityCode = z.string().regex(/^[A-Z]{3}$/);
 export type CityCode = z.infer<typeof CityCode>;
 
-const Sha256 = z.string().regex(/^[0-9a-f]{64}$/);
-const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
-const EpochMs = z.number().int().positive();
+export const Sha256 = z.string().regex(/^[0-9a-f]{64}$/);
+const IsoDate = z.iso.date();
+export const EpochMs = z.number().int().positive();
 const Id = z.string().min(1);
 
 // ---------- README 六实体 ----------
@@ -383,7 +439,7 @@ export const Artifact = z.object({
   gps: Gps.optional(),
   deviceId: z.string().min(1),
   version: z.number().int().positive().default(1),
-  refId: z.string().optional(),
+  refId: z.string().min(1).optional(),
 });
 export type Artifact = z.infer<typeof Artifact>;
 
@@ -404,7 +460,7 @@ export const Memo = z.object({
   type: MemoType,
   content: z.string().min(1),
   createdAt: EpochMs,
-  confirmedAt: z.number().int().positive().nullable().default(null),
+  confirmedAt: EpochMs.nullable().default(null),
 });
 export type Memo = z.infer<typeof Memo>;
 
@@ -416,7 +472,7 @@ export const ConsentRecord = z.object({
   signatureArtifactId: Id.optional(),
   verbalConsentArtifactId: Id.optional(),
   scope: z.string().min(1),
-  withdrawnAt: z.number().int().positive().nullable().default(null),
+  withdrawnAt: EpochMs.nullable().default(null),
 });
 export type ConsentRecord = z.infer<typeof ConsentRecord>;
 
@@ -454,7 +510,7 @@ export type EvidenceEntry = z.infer<typeof EvidenceEntry>;
 - [ ] **Step 4: 运行确认通过**
 
 Run: `cd packages/core && pnpm vitest run test/entities.test.ts`
-Expected: 全部 PASS（14 tests）
+Expected: 全部 PASS（26 tests）
 
 - [ ] **Step 5: Commit**
 
@@ -1101,3 +1157,9 @@ git commit -m "feat(core): public exports and cross-module integration test"
 - **规格覆盖**：§2.1 链式哈希（Task 4）、§2.2 action 枚举（Task 2）、§2.5 引用 ID（Task 6）、§3 全部实体 + 匿名化类型边界（Task 2）、§4 bundle 格式基础（Task 5）。§1/§4 的桌面服务流、§5 错误处理、§6 E2E 属于 Plan 2；手机端 UI 与 bundle 产出属于 Plan 3。
 - **占位符扫描**：无 TBD/TODO，所有代码步骤含完整代码。
 - **类型一致性**：`EvidenceAction`（const + type 同名导出）、`GENESIS_PREV_HASH`、`createEntry(prev: EvidenceEntry | null, input: EntryInput)`、`BundleV1`/`MediaRef` schema 与测试中的字段名逐一对齐（participantRef、payloadHash、entryHash、offsetSeconds）。
+- **执行期偏差记录**（2026-09-10，Task 2 代码质量评审后追加，commit 75c1f3c）：
+  - `IsoDate` 由正则改为 `z.iso.date()`——原正则会放过 `2026-02-31` 这类不存在日期，而字段日期会被永久绑入证据内容。
+  - `Sha256`、`EpochMs` 改为导出——Task 5 的 `MediaRef` 原计划内联重写同一哈希规则，证据完整性代码不允许两份独立副本。
+  - `Artifact.refId` 加 `min(1)`；`confirmedAt`/`withdrawnAt` 改用 `EpochMs.nullable().default(null)`（行为不变）。
+  - 测试新增 8 个：Memo / InboxItem / TimeSyncRecord 覆盖、camelCase realName 拒绝、大写 sha256 拒绝、不存在日历日期拒绝。
+  - 原 Step 4 预期「14 tests」为估算偏差（`it.each` 展开 4 例，实际 17）；追加后为 26。上方代码块已同步为最终状态。
