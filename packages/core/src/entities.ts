@@ -35,9 +35,9 @@ export type Gps = z.infer<typeof Gps>;
 export const CityCode = z.string().regex(/^[A-Z]{3}$/);
 export type CityCode = z.infer<typeof CityCode>;
 
-const Sha256 = z.string().regex(/^[0-9a-f]{64}$/);
-const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
-const EpochMs = z.number().int().positive();
+export const Sha256 = z.string().regex(/^[0-9a-f]{64}$/);
+const IsoDate = z.iso.date();
+export const EpochMs = z.number().int().positive();
 const Id = z.string().min(1);
 
 // ---------- README 六实体 ----------
@@ -74,7 +74,7 @@ export const Artifact = z.object({
   gps: Gps.optional(),
   deviceId: z.string().min(1),
   version: z.number().int().positive().default(1),
-  refId: z.string().optional(),
+  refId: z.string().min(1).optional(),
 });
 export type Artifact = z.infer<typeof Artifact>;
 
@@ -95,7 +95,7 @@ export const Memo = z.object({
   type: MemoType,
   content: z.string().min(1),
   createdAt: EpochMs,
-  confirmedAt: z.number().int().positive().nullable().default(null),
+  confirmedAt: EpochMs.nullable().default(null),
 });
 export type Memo = z.infer<typeof Memo>;
 
@@ -107,7 +107,7 @@ export const ConsentRecord = z.object({
   signatureArtifactId: Id.optional(),
   verbalConsentArtifactId: Id.optional(),
   scope: z.string().min(1),
-  withdrawnAt: z.number().int().positive().nullable().default(null),
+  withdrawnAt: EpochMs.nullable().default(null),
 });
 export type ConsentRecord = z.infer<typeof ConsentRecord>;
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   CityCode, FieldEvent, Encounter, Artifact, Participant, EvidenceEntry, ConsentRecord,
+  Memo, InboxItem, TimeSyncRecord,
 } from '../src/entities';
 
 const validEvent = {
@@ -18,6 +19,9 @@ describe('FieldEvent', () => {
   });
   it('拒绝非法日期', () => {
     expect(FieldEvent.safeParse({ ...validEvent, date: '2026-9-9' }).success).toBe(false);
+  });
+  it('拒绝不存在的日历日期', () => {
+    expect(FieldEvent.safeParse({ ...validEvent, date: '2026-02-31' }).success).toBe(false);
   });
 });
 
@@ -46,6 +50,9 @@ describe('Artifact', () => {
   it('拒绝非法类型', () => {
     expect(Artifact.safeParse({ ...validArtifact, type: 'video' }).success).toBe(false);
   });
+  it('拒绝大写 sha256', () => {
+    expect(Artifact.safeParse({ ...validArtifact, sha256: 'A'.repeat(64) }).success).toBe(false);
+  });
 });
 
 describe('Encounter', () => {
@@ -68,6 +75,9 @@ describe('Participant 隐私边界', () => {
   it('strict 模式拒绝携带 real_name', () => {
     const withRealName = { pseudonym: 'P-001', real_name: '张三' };
     expect(Participant.safeParse(withRealName).success).toBe(false);
+  });
+  it('拒绝任何未知字段（含 camelCase realName）', () => {
+    expect(Participant.safeParse({ pseudonym: 'P-001', realName: '张三' }).success).toBe(false);
   });
   it('接受合法档案', () => {
     const p = { pseudonym: 'P-001', industry: '菌子批发', referralChain: ['P-002'] };
@@ -107,5 +117,51 @@ describe('ConsentRecord', () => {
   it('拒绝非法模板类型', () => {
     const c = { id: 'con-001', encounterId: 'enc-001', templateType: 'verbal_only', scope: 'x' };
     expect(ConsentRecord.safeParse(c).success).toBe(false);
+  });
+});
+
+describe('Memo', () => {
+  const validMemo = {
+    id: 'memo-001',
+    linkedArtifactIds: ['art-001'],
+    type: 'reflexive',
+    content: '第一天的反思笔记',
+    createdAt: 1757376000000,
+  };
+  it('接受合法备忘且 confirmedAt 缺省为 null', () => {
+    expect(Memo.parse(validMemo).confirmedAt).toBeNull();
+  });
+  it('拒绝非法备忘类型', () => {
+    expect(Memo.safeParse({ ...validMemo, type: 'rant' }).success).toBe(false);
+  });
+});
+
+describe('InboxItem', () => {
+  const validItem = {
+    id: 'inb-001',
+    sourcePath: '/Volumes/SD/IMG_0001.MP4',
+    detectedAt: 1757376000000,
+    status: 'pending',
+  };
+  it('接受合法收件项', () => {
+    expect(InboxItem.parse(validItem).status).toBe('pending');
+  });
+  it('拒绝非法状态', () => {
+    expect(InboxItem.safeParse({ ...validItem, status: 'done' }).success).toBe(false);
+  });
+});
+
+describe('TimeSyncRecord', () => {
+  const validSync = {
+    id: 'ts-001',
+    checkedAt: 1757376000000,
+    ntpServer: 'ntp.aliyun.com',
+    offsetMs: -350,
+  };
+  it('接受负时钟偏移', () => {
+    expect(TimeSyncRecord.parse(validSync).offsetMs).toBe(-350);
+  });
+  it('拒绝小数偏移', () => {
+    expect(TimeSyncRecord.safeParse({ ...validSync, offsetMs: 1.5 }).success).toBe(false);
   });
 });
