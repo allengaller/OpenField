@@ -1,6 +1,7 @@
 {
   "name": "openfield",
   "private": true,
+  "packageManager": "pnpm@11.6.0",
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "pnpm -r run test",
