@@ -36,6 +36,7 @@ export interface BundleIssue {
 export class BundleValidationError extends Error {
   constructor(readonly issues: BundleIssue[]) {
     super(`bundle 校验失败：${issues.length} 个问题`);
+    this.name = 'BundleValidationError';
   }
 }
 

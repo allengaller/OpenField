@@ -81,6 +81,16 @@ describe('bundle 错误面', () => {
   it('decodeBundle 非 JSON → issues 形状恰为 [{ message: "不是合法 JSON" }]', () => {
     expect(issuesOf(() => decodeBundle('not json'))).toEqual([{ message: '不是合法 JSON' }]);
   });
+  it('BundleValidationError 实例 name 为类名（Error.name 覆写，不回退到 Error）', () => {
+    try {
+      decodeBundle('not json');
+    } catch (e) {
+      expect(e).toBeInstanceOf(BundleValidationError);
+      expect((e as BundleValidationError).name).toBe('BundleValidationError');
+      return;
+    }
+    throw new Error('预期抛出 BundleValidationError');
+  });
   it('decodeBundle 未知顶层键 → issue 标识该键（zod 4 顶层未知键无 path，按实际行为断言）', () => {
     const issues = issuesOf(() => decodeBundle(JSON.stringify({ ...validBundle, surprise: true })));
     expect(issues[0]).toMatchObject({ code: 'unrecognized_keys' });

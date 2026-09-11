@@ -90,7 +90,16 @@ describe('错误统一', () => {
     ['make：offsetSeconds 超过 5999', () => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: 6000 })],
     ['parse：垃圾输入', () => parseRefId('OF-2026-KMG-1')],
     ['parse：非法分钟 #T99:99', () => parseRefId('OF-20260909-KMG-003#T99:99')],
+    ['parse：不存在的日历日期', () => parseRefId('OF-20260231-KMG-001')],
   ])('%s → RefIdError', (_name, trigger) => {
-    expect(trigger).toThrow(RefIdError);
+    // try/catch 捕获错误对象：除类型外钉住 Error.name 覆写（防止 name 回退为 'Error'）。
+    try {
+      trigger();
+    } catch (e) {
+      expect(e).toBeInstanceOf(RefIdError);
+      expect((e as RefIdError).name).toBe('RefIdError');
+      return;
+    }
+    throw new Error('预期抛出 RefIdError');
   });
 });

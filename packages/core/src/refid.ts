@@ -1,6 +1,11 @@
 import { CityCode, IsoDate } from './entities';
 
-export class RefIdError extends Error {}
+export class RefIdError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RefIdError';
+  }
+}
 
 export interface RefIdParts {
   date: string;
