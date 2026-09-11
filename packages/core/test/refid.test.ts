@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { makeRefId, parseRefId } from '../src/refid';
+import { makeRefId, parseRefId, RefIdError } from '../src/refid';
 
 describe('makeRefId', () => {
   it('基础格式（README 示例结构）', () => {
@@ -15,8 +15,20 @@ describe('makeRefId', () => {
       'OF-20260909-KMG-001#T00:00',
     );
   });
+  it('seq 下界 0 → 含 -000', () => {
+    expect(makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 0 })).toBe('OF-20260909-KMG-000');
+  });
+  it('seq 上界 999 → 含 -999', () => {
+    expect(makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 999 })).toBe('OF-20260909-KMG-999');
+  });
+  it('seq 非整数 1.5 → 抛 RefIdError', () => {
+    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1.5 })).toThrow(RefIdError);
+  });
+  it('seq 负数 -1 → 抛 RefIdError', () => {
+    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: -1 })).toThrow(RefIdError);
+  });
   it('小写城市码 → 抛错', () => {
-    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'kmg', seq: 1 })).toThrow();
+    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'kmg', seq: 1 })).toThrow(RefIdError);
   });
   it('坏日期 → 抛错', () => {
     expect(() => makeRefId({ date: '2026-9-9', cityCode: 'KMG', seq: 1 })).toThrow(/YYYY-MM-DD/);
@@ -28,10 +40,10 @@ describe('makeRefId', () => {
     expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1000 })).toThrow(/seq/);
   });
   it('负偏移 → 抛错', () => {
-    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: -1 })).toThrow();
+    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: -1 })).toThrow(RefIdError);
   });
   it('偏移超过 #T99:59 上限 → 抛错', () => {
-    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: 6000 })).toThrow();
+    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: 6000 })).toThrow(RefIdError);
   });
 });
 
@@ -66,5 +78,19 @@ describe('parseRefId', () => {
   });
   it('不存在的日历日期 → 抛错', () => {
     expect(() => parseRefId('OF-20260231-KMG-003')).toThrow(/无法解析/);
+  });
+});
+
+// 错误统一：所有非法输入一律抛 RefIdError（不再混入 ZodError），调用方可单点捕获。
+describe('错误统一', () => {
+  it.each([
+    ['make：小写城市码', () => makeRefId({ date: '2026-09-09', cityCode: 'kmg', seq: 1 })],
+    ['make：不存在的日历日期', () => makeRefId({ date: '2026-02-31', cityCode: 'KMG', seq: 1 })],
+    ['make：非整数 seq', () => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1.5 })],
+    ['make：offsetSeconds 超过 5999', () => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: 6000 })],
+    ['parse：垃圾输入', () => parseRefId('OF-2026-KMG-1')],
+    ['parse：非法分钟 #T99:99', () => parseRefId('OF-20260909-KMG-003#T99:99')],
+  ])('%s → RefIdError', (_name, trigger) => {
+    expect(trigger).toThrow(RefIdError);
   });
 });
