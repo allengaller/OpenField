@@ -1189,3 +1189,4 @@ git commit -m "feat(core): public exports and cross-module integration test"
   - Task 5（质量评审后追加）：`BundleV1` 由 `z.object` 改为 `z.strictObject`——bundle 是证据传输格式，未知顶层键静默剥离会把「不完整证据当完整证据」摄入；前向兼容由 `schemaVersion: z.literal(1)` 版本门槛负责，不需要 strip-mode。新增「拒绝未知顶层字段」测试。嵌套实体的 strip 行为保留（Task 2 评审已记录该取舍），Plan 2/3 协调前不再收紧。上方代码块已同步。
   - Task 6（规格评审发现的计划内缺陷）：`#T` 是 MM:SS（分钟可为 00–99，上限 #T99:59 = 5999s），但 `parseRefId` 原守卫 `minutes > 59` 会拒绝 make 侧合法产出的 60–99 分钟，往返在偏移 ≥3600s 时断裂。守卫改为 `minutes > 99 || seconds > 59`（分钟两位数字已被正则限定 ≤99，99 分支为防御性冗余）。新增 3600s / 5999s 往返测试。上方代码块已同步。
   - Task 6（质量评审后追加）：make/parse 两侧均增加日历日期校验（复用 Task 2 导出的 `IsoDate` = `z.iso.date()`），拒绝 `2026-02-31` 这类格式合法但不存在的日期——引用 ID 是学术输出的引用表面，`OF-20260231` 会被印进论文。`IsoDate` 随之导出。新增 make/parse 各一个日历拒绝测试。上方代码块已同步。
+  - Task 1（终审补充）：commit 485e2cb 对 `tsconfig.base.json` 加固（`verbatimModuleSyntax`、`lib: ["ESNext"]`）并在根 `package.json` 钉住 `packageManager: pnpm@11.6.0`——这些改动未回写上方 Task 1 代码块，以仓库实际状态为准。
