@@ -309,6 +309,7 @@ export function insertTimeSyncRecord(db: Database.Database, r: TimeSyncRecord): 
 
 // ---------- IfAbsent（bundle 应用等幂等场景用：返回是否新插入） ----------
 
+// table 只能由本文件内的字面量调用方传入，不得来自外部输入（防注入约定）
 function existsWithId(db: Database.Database, table: string, id: string): boolean {
   return !!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id);
 }

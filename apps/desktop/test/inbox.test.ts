@@ -1,6 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { decodeBundle, encodeBundle, verifyChain, type Bundle } from '@openfield/core';
 import { cleanupTestVault, makeTestVault } from './helpers';
@@ -103,5 +102,25 @@ describe('applyBundle', () => {
     expect(listEvidenceEntries(db).length).toBe(chainLen + 1); // 首次：1 条 CREATE_EVENT
     expect(() => applyBundle(db, bundle)).not.toThrow();
     expect(listEvidenceEntries(db).length).toBe(chainLen + 1); // 重复应用不入新链目
+  });
+
+  it('重复应用含 mediaRefs 的 bundle 不产生重复 pending 项（A10）', () => {
+    const bundle: Bundle = decodeBundle(encodeBundle({
+      schemaVersion: 1,
+      id: 'bundle-3',
+      deviceId: 'iphone-01',
+      createdAt: 1757376600000,
+      events: [],
+      encounters: [],
+      participants: [],
+      consents: [],
+      memos: [],
+      mediaRefs: [{ filename: 'clip.m4a', sha256: 'b'.repeat(64), bytes: 2048, mime: 'audio/mp4', type: 'audio', capturedAt: 1757376600000 }],
+    }));
+    applyBundle(db, bundle);
+    const count = (): number => listInboxItems(db, 'pending').filter((i) => i.sourcePath === 'bundle:bundle-3:clip.m4a').length;
+    expect(count()).toBe(1);
+    applyBundle(db, bundle);
+    expect(count()).toBe(1);
   });
 });
