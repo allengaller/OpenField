@@ -1,0 +1,31 @@
+import { watch } from 'chokidar';
+import type { AppState } from './state';
+import { scanOnce, type ScanSummary } from './services/inbox';
+
+export function startInboxWatcher(state: AppState, onSummary: (s: ScanSummary) => void): () => void {
+  let timer: NodeJS.Timeout | null = null;
+  const schedule = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (!state.unlocked) return;
+      scanOnce(state.getDb(), { inboxDir: state.paths.inboxDir, quarantineDir: state.paths.quarantineDir })
+        .then((s) => {
+          if (s.pending + s.quarantined + s.appliedBundles > 0) onSummary(s);
+        })
+        .catch(() => {}); // 文件事件会集中爆发，单次失败交给下次触发；scanOnce 对目录缺失返回空
+    }, 300);
+  };
+
+  const watcher = watch(state.paths.inboxDir, {
+    depth: 0,
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
+  });
+  watcher.on('add', schedule).on('change', schedule).on('unlink', schedule);
+
+  return () => {
+    if (timer) clearTimeout(timer);
+    void watcher.close();
+  };
+}

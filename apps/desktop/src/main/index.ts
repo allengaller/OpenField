@@ -1,24 +1,44 @@
+import { app, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { app, BrowserWindow } from 'electron';
+import { resolveHome } from './home';
+import { AppState } from './state';
+import { createIpcHandlers } from './ipc';
+import { startInboxWatcher } from './watcher';
+import { IPC_CHANNELS } from '../shared/ipc';
 
-function createWindow(): void {
+const state = new AppState(resolveHome(process.argv, join(app.getPath('userData'), 'openfield')));
+let stopWatcher: (() => void) | null = null;
+
+function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    title: 'OpenField',
-    webPreferences: { preload: join(__dirname, '../preload/index.js') },
+    width: 980,
+    height: 760,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
   });
-  if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL);
-  else win.loadFile(join(__dirname, '../renderer/index.html'));
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void win.loadURL(process.env.ELECTRON_RENDERER_URL);
+  } else {
+    void win.loadFile(join(__dirname, '../renderer/index.html'));
+  }
+  return win;
 }
 
-app.whenReady().then(() => {
-  createWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
+void app.whenReady().then(() => {
+  const handlers = createIpcHandlers(state);
+  for (const channel of IPC_CHANNELS) {
+    ipcMain.handle(channel, (_event, payload: unknown) => handlers[channel](payload));
+  }
+  const win = createWindow();
+  stopWatcher = startInboxWatcher(state, (s) => win.webContents.send('inbox:changed', s));
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  stopWatcher?.();
+  state.close();
+  app.quit();
 });

@@ -2,10 +2,48 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
     <title>OpenField</title>
   </head>
   <body>
-    <div id="app">OpenField P1 — 桌面端骨架（React UI 在 Plan 3 接入）</div>
+    <h1>OpenField P1 控制台</h1>
+    <section>
+      <h2>Vault</h2>
+      <input id="pass" type="password" placeholder="口令（≥8 字符）" />
+      <button id="btn-create">创建 vault</button>
+      <button id="btn-open">解锁</button>
+      <button id="btn-status">状态</button>
+      <pre id="status">locked</pre>
+    </section>
+    <section>
+      <h2>登记</h2>
+      <input id="ev-id" placeholder="事件 ID（evt-1）" />
+      <input id="ev-date" placeholder="日期 2026-09-11" />
+      <input id="ev-city" placeholder="城市码 KMG" />
+      <input id="ev-loc" placeholder="地点名称" />
+      <button id="btn-event">创建事件</button>
+      <br />
+      <input id="enc-id" placeholder="访谈 ID（enc-1）" />
+      <input id="enc-event" placeholder="所属事件 ID（evt-1）" />
+      <input id="enc-participant" placeholder="受访者笔名（P01）" />
+      <input id="enc-reason" placeholder="抽样理由" />
+      <button id="btn-encounter">创建访谈</button>
+    </section>
+    <section>
+      <h2>Inbox</h2>
+      <button id="btn-scan">扫描</button>
+      <pre id="scan"></pre>
+      <input id="confirm-enc" placeholder="归入访谈 ID（enc-1）" />
+      <ul id="pending"></ul>
+    </section>
+    <section>
+      <h2>校验与引用</h2>
+      <button id="btn-verify">运行校验</button>
+      <pre id="report"></pre>
+      <input id="cite-art" placeholder="采集物 ID" />
+      <button id="btn-cite">生成引用</button>
+      <pre id="cite-out"></pre>
+    </section>
+    <script type="module" src="./src/main.ts"></script>
   </body>
 </html>
