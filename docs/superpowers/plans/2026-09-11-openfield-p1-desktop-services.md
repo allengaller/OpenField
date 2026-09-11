@@ -201,6 +201,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A15 — 引用幂等 + 备份临时文件清理（Task 11 质量评审 CHANGES_REQUIRED，2026-09-11）：** ① `makeCitation` 无重复引用防护：`setArtifactRefId` 是无条件 UPDATE，IPC 重试/双击会对已签发 refId 的 artifact 重新计数、覆盖旧 ID 并追加第二条 EXPORT——学术引用 ID 一经签发不可变更，且 verifyChain 无法察觉这种漂移。修正：artifact 已有 refId 时幂等返回 `{ refId, artifact }`，不写库不入链。② `exportBackup` 中 `backupVault` 位于 try/finally 之外：VACUUM INTO 中途失败（磁盘满/库被锁）会残留残缺的 `${outPath}.tmp-vault.db`，后续对同一 outPath 的备份因「备份目标已存在」持续失败，且抛的是 VaultError 而非 ExportError。修正：调用前 `rmSync(tmpDb, { force: true })` 清掉历史残留，并把 `backupVault` 移入 try 使 finally 全程覆盖。测试增加"重复引用幂等返回既有 refId（链长不变）"与"残留临时文件不阻塞备份"两用例，export 7 个，全套 57 个。
 
+**A16 — watcher 冷启动失效 + 测试竞态 + renderer 错误不可见（Task 12 质量评审 CHANGES_REQUIRED，2026-09-12）：** ① 首次启动（解锁前）inboxDir 尚不存在，chokidar 对不存在目录的 watch 永不生效（ENOENT 被内部吞掉）且不报错——onboarding 当次会话的自动扫描与 `inbox:changed` 推送全程失效。修正：`startInboxWatcher` 入口先 `mkdirSync(state.paths.inboxDir, { recursive: true })`；新增"inbox 目录不存在时启动 watcher 仍能自动扫描"回归用例。② watcher 测试在 `startInboxWatcher` 返回后 0ms 写文件，落进 chokidar 异步武装窗口，被初始扫描当已有文件吞掉（`ignoreInitial` 压制 add），仅靠迟到的 change 事件偶发补救——实测全套 5 跑 2 挂。修正：写入前 `await 50ms` 让武装完成，外层超时 5s → 10s。③ renderer 全部 click 处理器 `await invoke` 无 catch，口令错误/重复 ID/确认失败等操作员最常见错误全部表现为静默无反应 + unhandled rejection。修正：`invoke` 在 ok:false 时把错误写入 `#status` 再抛出；模块底部挂 `unhandledrejection` 监听兜底。shell 7 个，全套 64 个。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -2808,7 +2810,7 @@ git commit -m "feat(desktop): citation refId generation and encrypted OFBK1 back
     - `getDb(): Database.Database`（未解锁抛错）；`close(): void`
     - `status(): { home: string; hasVault: boolean; unlocked: boolean; events: number; encounters: number; pendingInbox: number }`
   - `ipc.ts`：`createIpcHandlers(state: AppState): Record<IpcChannel, (payload: unknown) => Promise<IpcResult<unknown>>>`——入参用 zod 收窄，业务校验交给服务的 zod；任何异常折叠为 `{ ok: false, error: message }`
-  - `watcher.ts`：`startInboxWatcher(state: AppState, onSummary: (s: ScanSummary) => void): () => void`——chokidar `depth: 0` + `awaitWriteFinish`，事件防抖 300ms 后 `scanOnce`；返回停止函数
+  - `watcher.ts`：`startInboxWatcher(state: AppState, onSummary: (s: ScanSummary) => void): () => void`——chokidar `depth: 0` + `awaitWriteFinish`，事件防抖 300ms 后 `scanOnce`；返回停止函数；入口先确保 inbox 目录存在（A16）
   - `preload/index.ts`：`window.openfield = { invoke(channel, payload), onInboxChanged(cb) }`（invoke 白名单校验 IPC_CHANNELS）
   - `index.ts`：装配（见 Step 5），`ipcMain.handle` 逐通道转发给 handlers；watcher 汇总推送 `inbox:changed`
 
@@ -2908,8 +2910,24 @@ describe('startInboxWatcher', () => {
     const summaries: unknown[] = [];
     const stop = startInboxWatcher(state, (s) => summaries.push(s));
     try {
+      await new Promise((r) => setTimeout(r, 50)); // A16：chokidar 异步武装，立即写入会被初始扫描当已有文件吞掉
       writeFileSync(join(state.paths.inboxDir, 'watched.wav'), Buffer.from('W'.repeat(64)));
-      await vi.waitFor(() => expect(listInboxItems(state.getDb(), 'pending')).toHaveLength(1), { timeout: 5_000, interval: 100 });
+      await vi.waitFor(() => expect(listInboxItems(state.getDb(), 'pending')).toHaveLength(1), { timeout: 10_000, interval: 100 });
+    } finally {
+      stop();
+      state.close();
+    }
+  });
+
+  it('inbox 目录不存在时启动 watcher 仍能自动扫描（A16）', async () => {
+    const state = new AppState(join(home, 's6'));
+    state.createVault('passphrase-1234');
+    rmSync(state.paths.inboxDir, { recursive: true, force: true });
+    const stop = startInboxWatcher(state, () => {});
+    try {
+      await new Promise((r) => setTimeout(r, 50));
+      writeFileSync(join(state.paths.inboxDir, 'late.wav'), Buffer.from('L'.repeat(64)));
+      await vi.waitFor(() => expect(listInboxItems(state.getDb(), 'pending')).toHaveLength(1), { timeout: 10_000, interval: 100 });
     } finally {
       stop();
       state.close();
@@ -3127,11 +3145,13 @@ export function createIpcHandlers(
 
 `apps/desktop/src/main/watcher.ts`:
 ```ts
+import { mkdirSync } from 'node:fs';
 import { watch } from 'chokidar';
 import type { AppState } from './state';
 import { scanOnce, type ScanSummary } from './services/inbox';
 
 export function startInboxWatcher(state: AppState, onSummary: (s: ScanSummary) => void): () => void {
+  mkdirSync(state.paths.inboxDir, { recursive: true }); // A16：chokidar 对不存在的目录永不生效（ENOENT 被内部吞掉），先确保目录在
   let timer: NodeJS.Timeout | null = null;
   const schedule = (): void => {
     if (timer) clearTimeout(timer);
@@ -3163,7 +3183,7 @@ export function startInboxWatcher(state: AppState, onSummary: (s: ScanSummary) =
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `pnpm --filter @openfield/desktop test -- shell`
-Expected: PASS（6 个测试）。
+Expected: PASS（7 个测试）。
 
 - [ ] **Step 5: 写薄壳（入口 / preload / renderer，E2E 覆盖）**
 
@@ -3312,7 +3332,10 @@ const $ = (id: string): HTMLElement => {
 
 async function invoke<T>(channel: string, payload?: unknown): Promise<T> {
   const res = (await window.openfield.invoke(channel, payload)) as IpcResult<T>;
-  if (!res.ok) throw new Error(res.error);
+  if (!res.ok) {
+    statusEl.textContent = `错误：${res.error}`;
+    throw new Error(res.error);
+  }
   return res.data;
 }
 
@@ -3394,6 +3417,9 @@ $('btn-cite').addEventListener('click', async () => {
     artifactId: ($('cite-art') as HTMLInputElement).value,
   });
   citeOutEl.textContent = out.refId;
+});
+window.addEventListener('unhandledrejection', (e) => {
+  statusEl.textContent = `错误：${e.reason instanceof Error ? e.reason.message : String(e.reason)}`;
 });
 window.openfield.onInboxChanged(() => void refreshPending());
 ```
