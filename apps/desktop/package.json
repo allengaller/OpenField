@@ -7,19 +7,25 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "test": "ELECTRON_RUN_AS_NODE=1 electron node_modules/vitest/vitest.mjs run",
-    "postinstall": "electron-rebuild -f -w better-sqlite3-multiple-ciphers"
+    "e2e": "electron-vite build && playwright test"
   },
   "dependencies": {
     "@openfield/core": "workspace:*",
-    "better-sqlite3-multiple-ciphers": "^12.0.0"
+    "@hapi/sntp": "^4.0.0",
+    "adm-zip": "^0.5.16",
+    "better-sqlite3-multiple-ciphers": "^13.0.0",
+    "chokidar": "^5.0.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.0.0",
+    "@playwright/test": "^1.63.0",
+    "@types/adm-zip": "^0.5.7",
     "@types/node": "^24.0.0",
-    "electron": "^33.0.0",
+    "electron": "^44.0.0",
     "electron-vite": "^5.0.0",
+    "playwright": "^1.63.0",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"
   }

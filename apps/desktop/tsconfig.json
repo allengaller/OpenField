@@ -1,5 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "noEmit": true, "types": ["node"] },
-  "include": ["src", "test", "electron.vite.config.ts", "vitest.config.ts"]
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "lib": ["ESNext", "DOM"],
+    "paths": {
+      "better-sqlite3-multiple-ciphers": ["./node_modules/better-sqlite3-multiple-ciphers/index.d.ts"]
+    }
+  },
+  "include": ["src", "test", "e2e", "electron.vite.config.ts", "vitest.config.ts", "playwright.config.ts"]
 }

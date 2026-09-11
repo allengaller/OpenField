@@ -33,7 +33,7 @@ export function makeRefId(parts: RefIdParts): string {
   const base = `OF-${parts.date.replaceAll('-', '')}-${city.data}-${String(parts.seq).padStart(3, '0')}`;
   if (parts.offsetSeconds === undefined) return base;
   if (!Number.isInteger(parts.offsetSeconds) || parts.offsetSeconds < 0 || parts.offsetSeconds > 5999) {
-    throw new RefIdError(`offsetSeconds 须在 0-5999（#T99:59 上限）：${parts.offsetSeconds}`);
+    throw new RefIdError(`offsetSeconds 须为 0-5999 整数（#T99:59 上限）：${parts.offsetSeconds}`);
   }
   const m = Math.floor(parts.offsetSeconds / 60);
   const s = parts.offsetSeconds % 60;

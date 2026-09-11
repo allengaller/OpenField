@@ -64,7 +64,7 @@ OpenField/
 │  │        └─ global.d.ts        # window.openfield 类型
 │  ├─ test/
 │  │  ├─ helpers.ts               # makeTestVault 等测试基建
-│  │  ├─ smoke.test.ts
+│  │  ├─ bootstrap.test.ts        # 脚手架接线（既有文件重写）
 │  │  ├─ migrations.test.ts
 │  │  ├─ vault.test.ts
 │  │  ├─ repos.test.ts
@@ -82,38 +82,131 @@ OpenField/
 
 ---
 
-### Task 1: 桌面应用脚手架
+## 执行修订记录（2026-09-11 仲裁移交后）
+
+> 依据 `docs/superpowers/plans/2026-09-11-openfield-p1-plan2a-desktop-foundation.md` 的仲裁记录：桌面实现移交本计划执行，Plan 2a 停止实施、转为评审参照；apps/desktop 已由并行会话落地脚手架（commit 32c7634）。以下修订在执行期生效，覆盖正文中与之冲突的步骤；未提及的步骤按正文原样执行。
+
+**A1 — evidence_log 追加只读改为 DB 层强制（吸收 Plan 2a ①）：** Task 2 的 v1 建表 SQL 末尾追加两个触发器，"不得 UPDATE/DELETE evidence_log" 由数据库强制而非仅靠约定：
+
+```sql
+CREATE TRIGGER evidence_log_no_update
+BEFORE UPDATE ON evidence_log
+BEGIN
+  SELECT RAISE(ABORT, 'evidence_log is append-only');
+END;
+
+CREATE TRIGGER evidence_log_no_delete
+BEFORE DELETE ON evidence_log
+BEGIN
+  SELECT RAISE(ABORT, 'evidence_log is append-only');
+END;
+```
+
+Task 2 的 migrations.test.ts 相应加第 4 个用例：向 evidence_log 插入一行合法链目后，UPDATE 与 DELETE 均须抛错（消息含 `append-only`），INSERT 不受影响；Task 5/6/7/8/9 的测试不得出现对 evidence_log 的改删。
+
+**A2 — pnpm-lock.yaml 入库（吸收 Plan 2a ④）：** 依赖有变更的任务（Task 1）提交时必须一并 `git add pnpm-lock.yaml`。
+
+**A3 — core 证据动作扩容（吸收 Plan 2a ③）：** 仲裁口径"vault 内每一行都有链上来源"。Task 2 开工前先做一个 core 预提交：
+- `packages/core/src/entities.ts` 的 `EvidenceAction` 在 `'MEMO_CONFIRM'` 之后插入 `'CREATE_PARTICIPANT', 'CREATE_MEMO'`；
+- `packages/core/test/entities.test.ts` 补一条用例：两个新动作能被 `EvidenceAction` parse，非法值被拒；
+- 同步 `docs/superpowers/specs/2026-09-09-openfield-p1-architecture-design.md` §2.2 的动作清单（追加两动作，理由：参与者与 Memo 行在服务层创建时同样入链，保证每行可溯源）；
+- 提交：`feat(core): add CREATE_PARTICIPANT and CREATE_MEMO evidence actions`。
+
+链上发射一律在服务层（registry/inbox/purge/export）发生；repos 仓储原语保持无副作用，不自动入链。
+
+**A4 — 服务层入链点修订（吸收 Plan 2a ③，与 A3 配套）：**
+
+- Task 6 `buildDailyJournal` 改为事务内 insertMemo + 入链（幂等分支直接返回、不入链）：
+
+```ts
+export function buildDailyJournal(db: Database.Database, date: string, opts: { now?: number } = {}): Memo {
+  const existing = listMemos(db).find((m) => m.type === 'daily' && m.id === `journal-${date}`);
+  if (existing) return existing;
+  const now = opts.now ?? Date.now();
+  const memo: Memo = {
+    id: `journal-${date}`,
+    linkedArtifactIds: [],
+    type: 'daily',
+    content: localTimeline(db, date),
+    createdAt: now,
+    confirmedAt: null,
+  };
+  const tx = db.transaction((): Memo => {
+    insertMemo(db, memo);
+    appendEntry(db, { ts: now, actor: 'desktop', action: 'CREATE_MEMO', payloadHash: computePayloadHash(memo) });
+    return memo;
+  });
+  return tx();
+}
+```
+
+测试相应断言：buildDailyJournal 后链尾 action 为 `CREATE_MEMO` 且 `verifyChain` ok；二次调用幂等且链长不变。
+
+- Task 8 `applyBundle` 改为：事务内仅对**实际新插入**的实体逐个入链（`IfAbsent` 返回 true 时），`payloadHash = computePayloadHash(实体)`、`actor = 'bundle:' + bundle.id`、`ts = bundle.createdAt`；重复应用同一 bundle 不产生新链目：
+
+```ts
+export function applyBundle(db: Database.Database, bundle: Bundle): void {
+  const actor = `bundle:${bundle.id}`;
+  const ts = bundle.createdAt;
+  const tx = db.transaction(() => {
+    for (const e of bundle.events) if (insertFieldEventIfAbsent(db, e)) appendEntry(db, { ts, actor, action: 'CREATE_EVENT', payloadHash: computePayloadHash(e) });
+    for (const p of bundle.participants) if (insertParticipantIfAbsent(db, p)) appendEntry(db, { ts, actor, action: 'CREATE_PARTICIPANT', payloadHash: computePayloadHash(p) });
+    for (const c of bundle.encounters) if (insertEncounterIfAbsent(db, c)) appendEntry(db, { ts, actor, action: 'CREATE_ENCOUNTER', payloadHash: computePayloadHash(c) });
+    for (const c of bundle.consents) if (insertConsentRecordIfAbsent(db, c)) appendEntry(db, { ts, actor, action: 'CONSENT_RECORDED', payloadHash: computePayloadHash(c) });
+    for (const m of bundle.memos) if (insertMemoIfAbsent(db, m)) appendEntry(db, { ts, actor, action: 'CREATE_MEMO', payloadHash: computePayloadHash(m) });
+    for (const m of bundle.mediaRefs) {
+      insertInboxItem(db, {
+        id: `inbox-${randomUUID()}`,
+        sourcePath: `bundle:${bundle.id}:${m.filename}`,
+        detectedAt: bundle.createdAt,
+        sha256: m.sha256,
+        suggestedEncounterId: m.encounterId,
+        status: 'pending' as InboxStatus,
+      });
+    }
+  });
+  tx();
+}
+```
+
+测试相应断言：applyBundle 后逐实体链目齐备且 `verifyChain` ok；重复应用同一 bundle 链长不变。
+
+- Task 9 `runVerify`：动作合法性校验直接复用 core 的 `EvidenceAction`（扩容后 10 个成员自动生效），不得手写枚举清单。
+
+**A5 — 原生模块策略修订（吸收 Plan 2a ⑤）：** better-sqlite3-multiple-ciphers ^13 自带 N-API 预编译二进制，Node 与 Electron 44 通用 → 全程删除 Electron-ABI 测试管线：`test` 脚本为纯 `vitest run`，删除 `postinstall: electron-rebuild` 与 `@electron/rebuild` devDep，不引入 electron-rebuild/环境变量切换。
+
+**A6 — sqlite 类型解析修正（执行期实测，2026-09-11）：** better-sqlite3-multiple-ciphers@13 的 `exports["."]` 是裸字符串 `"./lib/index.js"`，在 bundler 模块解析下遮蔽了自带的 `index.d.ts`（TS7016）；其 npm 上无 `@types` 包，pnpm `packageExtensions` 无法把字符串键替换为对象（pnpm 11 合并语义跳过）。修正：`apps/desktop/tsconfig.json` 的 compilerOptions 增加 paths 映射（仅影响 TS 解析，运行时打包不受影响）：
+
+```json
+"paths": {
+  "better-sqlite3-multiple-ciphers": ["./node_modules/better-sqlite3-multiple-ciphers/index.d.ts"]
+}
+```
+
+### Task 1: 桌面应用脚手架（与已落地脚手架合并）
+
+> apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
 
 **Files:**
-- Modify: `pnpm-workspace.yaml`
-- Create: `apps/desktop/package.json`, `apps/desktop/tsconfig.json`, `apps/desktop/electron.vite.config.ts`, `apps/desktop/vitest.config.ts`
-- Create: `apps/desktop/src/shared/ipc.ts`, `apps/desktop/test/smoke.test.ts`
+- Modify: `apps/desktop/package.json`（scripts + 依赖对齐，见 Step 1）
+- Modify: `apps/desktop/tsconfig.json`（见 Step 2）
+- Create: `apps/desktop/src/shared/ipc.ts`
+- Rewrite: `apps/desktop/test/bootstrap.test.ts`（删除 Electron-ABI 断言）
 
 **Interfaces:**
 - Consumes: `@openfield/core`（workspace 依赖，`CORE_VERSION`）
-- Produces: `apps/desktop` 包骨架；`src/shared/ipc.ts` 的 `IpcResult<T>` 信封类型（Task 12 的 IPC 与 renderer 均复用）
+- Produces: 与正文一致的包骨架（钉版：Electron ^44、sqlite ^13、纯 vitest）；`src/shared/ipc.ts` 的 `IpcResult<T>` 信封类型（Task 12 的 IPC 与 renderer 均复用）
 
-- [ ] **Step 1: pnpm-workspace.yaml 增加 electron 构建许可**
+- [ ] **Step 1: package.json 对齐钉版（修订 A5）**
 
-`pnpm-workspace.yaml` 整体替换为：
-```yaml
-packages:
-  - packages/*
-  - apps/*
+保持 `"type": "module"` 与现有 `electron.vite.config.ts` / `src/` 结构不动，package.json 的 scripts 与依赖改为目标态（完整内容）：
 
-allowBuilds:
-  esbuild: true
-  electron: true
-```
-
-- [ ] **Step 2: 写 apps/desktop 包配置**
-
-`apps/desktop/package.json`:
 ```json
 {
   "name": "@openfield/desktop",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
@@ -142,64 +235,52 @@ allowBuilds:
   }
 }
 ```
-（说明：better-sqlite3-multiple-ciphers 自带 TypeScript 类型；若 typecheck 报类型缺失，属执行期偏差，安装 `@types/better-sqlite3` 并记录到自检附录。）
 
-`apps/desktop/tsconfig.json`:
+相对现仓库的 diff 语义：删除 `postinstall`（electron-rebuild）与 `@electron/rebuild` devDep（A5：N-API 预编译，无需 rebuild）；`test` 从 `ELECTRON_RUN_AS_NODE=1 electron …` 改为 `vitest run`；`electron` ^33→^44、`better-sqlite3-multiple-ciphers` ^12→^13；新增 deps `@hapi/sntp`、`adm-zip`、`chokidar`、`zod` 与 devDeps `@playwright/test`、`playwright`、`@types/adm-zip`。
+
+- [ ] **Step 2: tsconfig 对齐（其余配置与壳文件不动）**
+
+`vitest.config.ts` 已存在且内容正确（`{ test: { environment: 'node' } }`），`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/` 全部不动。`tsconfig.json` 整体替换为：
+
 ```json
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "lib": ["ESNext", "DOM"]
+    "types": ["node"],
+    "lib": ["ESNext", "DOM"],
+    "paths": {
+      "better-sqlite3-multiple-ciphers": ["./node_modules/better-sqlite3-multiple-ciphers/index.d.ts"]
+    }
   },
   "include": ["src", "test", "e2e", "electron.vite.config.ts", "vitest.config.ts", "playwright.config.ts"]
 }
 ```
 
-`apps/desktop/electron.vite.config.ts`:
-```ts
-import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
-import { resolve } from 'node:path';
+（`e2e/` 与 `playwright.config.ts` 由 Task 13 落地；include 先行列出空目标不会报错。`paths` 见修订 A6。）
 
-export default defineConfig({
-  main: {
-    // 只外置原生模块；@openfield/core 与其余依赖全部打包进 out/main/index.js
-    plugins: [externalizeDepsPlugin({ include: ['better-sqlite3-multiple-ciphers'] })],
-    build: { rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts') } } },
-  },
-  preload: {
-    build: { rollupOptions: { input: { index: resolve(__dirname, 'src/preload/index.ts') } } },
-  },
-  renderer: {
-    build: { rollupOptions: { input: { index: resolve(__dirname, 'src/renderer/index.html') } } },
-  },
-});
-```
+- [ ] **Step 3: 共享类型 + 重写冒烟测试**
 
-`apps/desktop/vitest.config.ts`:
-```ts
-import { defineConfig } from 'vitest/config';
-
-export default defineConfig({
-  test: { environment: 'node' },
-});
-```
-
-- [ ] **Step 3: 写共享类型与冒烟测试**
-
-`apps/desktop/src/shared/ipc.ts`:
+`apps/desktop/src/shared/ipc.ts`（新建）:
 ```ts
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string };
 ```
 
-`apps/desktop/test/smoke.test.ts`:
+`apps/desktop/test/bootstrap.test.ts` 整体重写（删除 Electron-ABI 断言，改验纯 Node 路径，A5）：
 ```ts
 import { describe, it, expect } from 'vitest';
 import { CORE_VERSION } from '@openfield/core';
+import Database from 'better-sqlite3-multiple-ciphers';
 
 describe('脚手架接线', () => {
   it('workspace 依赖 @openfield/core 可解析', () => {
     expect(CORE_VERSION).toBe('0.1.0');
+  });
+
+  it('原生 sqlite 模块在纯 Node（vitest）下可加载', () => {
+    const db = new Database(':memory:');
+    expect(db.prepare('SELECT 1 AS one').get()).toEqual({ one: 1 });
+    db.close();
   });
 });
 ```
@@ -207,13 +288,13 @@ describe('脚手架接线', () => {
 - [ ] **Step 4: 安装并验证**
 
 Run: `pnpm install && pnpm --filter @openfield/desktop typecheck && pnpm --filter @openfield/desktop test && pnpm --filter @openfield/desktop build`
-Expected: 安装成功（electron 二进制经 allowBuilds 下载）；typecheck 无错误；`1 passed`；`out/main/index.js`、`out/preload/index.js`、`out/renderer/index.html` 均产出。
+Expected: 安装成功（electron ^44 二进制经 allowBuilds 下载，无 rebuild 步骤）；typecheck 无错误；`2 passed`；`out/main/index.js`、`out/preload/index.js`、`out/renderer/index.html` 均产出。
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit（必须含 pnpm-lock.yaml，修订 A2）**
 
 ```bash
-git add pnpm-workspace.yaml apps/desktop
-git commit -m "chore(desktop): scaffold electron app with electron-vite and sqlcipher deps"
+git add apps/desktop pnpm-lock.yaml
+git commit -m "chore(desktop): align scaffold with plan pins - electron 44, napi sqlite, plain vitest"
 ```
 
 ---
