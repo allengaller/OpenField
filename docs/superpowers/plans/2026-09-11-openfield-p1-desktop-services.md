@@ -3459,7 +3459,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: 'e2e',
-  testMatch: '**/*.e2e.ts', // A18：默认 testMatch 不匹配 *.e2e.ts 文件名
+  testMatch: '**/*.e2e.ts',
   timeout: 120_000,
   forbidOnly: !!process.env.CI,
 });
