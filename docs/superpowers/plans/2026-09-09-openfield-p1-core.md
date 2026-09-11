@@ -858,6 +858,10 @@ describe('bundle v1', () => {
   it('非 JSON 文本 → BundleValidationError 而非 SyntaxError 泄漏', () => {
     expect(() => decodeBundle('not json')).toThrow(BundleValidationError);
   });
+  it('拒绝未知顶层字段', () => {
+    const bad = { ...validBundle, extraField: 'x' };
+    expect(() => decodeBundle(JSON.stringify(bad))).toThrow(BundleValidationError);
+  });
 });
 ```
 
@@ -885,7 +889,7 @@ export const MediaRef = z.object({
 });
 export type MediaRef = z.infer<typeof MediaRef>;
 
-export const BundleV1 = z.object({
+export const BundleV1 = z.strictObject({
   schemaVersion: z.literal(1),
   id: z.string().min(1),
   deviceId: z.string().min(1),
@@ -925,7 +929,7 @@ export function decodeBundle(text: string): Bundle {
 - [ ] **Step 4: 运行确认通过**
 
 Run: `cd packages/core && pnpm vitest run test/bundle.test.ts`
-Expected: 全部 PASS（5 tests）
+Expected: 全部 PASS（6 tests）
 
 - [ ] **Step 5: Commit**
 
@@ -1164,3 +1168,4 @@ git commit -m "feat(core): public exports and cross-module integration test"
   - 测试新增 8 个：Memo / InboxItem / TimeSyncRecord 覆盖、camelCase realName 拒绝、大写 sha256 拒绝、不存在日历日期拒绝。
   - 原 Step 4 预期「14 tests」为估算偏差（`it.each` 展开 4 例，实际 17）；追加后为 26。上方代码块已同步为最终状态。
   - Task 5（执行时）：`MediaRef` 的 `sha256`/`capturedAt` 改为引用 Task 2 加固后导出的 `Sha256`/`EpochMs`，不再内联重写同一哈希规则（即 Task 2 评审「导出以供 Task 5 引用」的落地）。上方 Task 5 代码块已同步。
+  - Task 5（质量评审后追加）：`BundleV1` 由 `z.object` 改为 `z.strictObject`——bundle 是证据传输格式，未知顶层键静默剥离会把「不完整证据当完整证据」摄入；前向兼容由 `schemaVersion: z.literal(1)` 版本门槛负责，不需要 strip-mode。新增「拒绝未知顶层字段」测试。嵌套实体的 strip 行为保留（Task 2 评审已记录该取舍），Plan 2/3 协调前不再收紧。上方代码块已同步。
