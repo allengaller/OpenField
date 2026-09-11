@@ -401,7 +401,7 @@ export const CityCode = z.string().regex(/^[A-Z]{3}$/);
 export type CityCode = z.infer<typeof CityCode>;
 
 export const Sha256 = z.string().regex(/^[0-9a-f]{64}$/);
-const IsoDate = z.iso.date();
+export const IsoDate = z.iso.date();
 export const EpochMs = z.number().int().positive();
 const Id = z.string().min(1);
 
@@ -973,6 +973,9 @@ describe('makeRefId', () => {
   it('坏日期 → 抛错', () => {
     expect(() => makeRefId({ date: '2026-9-9', cityCode: 'KMG', seq: 1 })).toThrow(/YYYY-MM-DD/);
   });
+  it('不存在的日历日期 → 抛错', () => {
+    expect(() => makeRefId({ date: '2026-02-31', cityCode: 'KMG', seq: 1 })).toThrow(/YYYY-MM-DD/);
+  });
   it('seq 超过 999 → 抛错', () => {
     expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1000 })).toThrow(/seq/);
   });
@@ -1013,6 +1016,9 @@ describe('parseRefId', () => {
   it('非法分钟 #T99:99 → 抛错', () => {
     expect(() => parseRefId('OF-20260909-KMG-003#T99:99')).toThrow(/无法解析/);
   });
+  it('不存在的日历日期 → 抛错', () => {
+    expect(() => parseRefId('OF-20260231-KMG-003')).toThrow(/无法解析/);
+  });
 });
 ```
 
@@ -1025,7 +1031,7 @@ Expected: FAIL（Cannot find module '../src/refid'）
 
 `packages/core/src/refid.ts`:
 ```ts
-import { CityCode } from './entities';
+import { CityCode, IsoDate } from './entities';
 
 export interface RefIdParts {
   date: string;
@@ -1043,8 +1049,8 @@ export interface ParsedRefId {
 
 export function makeRefId(parts: RefIdParts): string {
   const city = CityCode.parse(parts.cityCode);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(parts.date)) {
-    throw new Error(`日期格式须为 YYYY-MM-DD：${parts.date}`);
+  if (!IsoDate.safeParse(parts.date).success) {
+    throw new Error(`日期格式须为 YYYY-MM-DD（含日历有效性）：${parts.date}`);
   }
   if (!Number.isInteger(parts.seq) || parts.seq < 0 || parts.seq > 999) {
     throw new Error(`seq 须为 0-999 整数：${parts.seq}`);
@@ -1062,19 +1068,21 @@ export function makeRefId(parts: RefIdParts): string {
 export function parseRefId(refId: string): ParsedRefId {
   const m = /^OF-(\d{4})(\d{2})(\d{2})-([A-Z]{3})-(\d{3})(?:#T(\d{2}):(\d{2}))?$/.exec(refId);
   if (!m || !m[1] || !m[2] || !m[3] || !m[4] || !m[5]) throw new Error(`无法解析引用 ID：${refId}`);
+  const date = `${m[1]}-${m[2]}-${m[3]}`;
+  if (!IsoDate.safeParse(date).success) throw new Error(`无法解析引用 ID：${refId}`);
   if (m[6] !== undefined) {
     const minutes = Number.parseInt(m[6], 10);
     const seconds = Number.parseInt(m[7] ?? '0', 10);
     if (minutes > 99 || seconds > 59) throw new Error(`无法解析引用 ID：${refId}`);
     return {
-      date: `${m[1]}-${m[2]}-${m[3]}`,
+      date,
       cityCode: m[4],
       seq: Number.parseInt(m[5], 10),
       offsetSeconds: minutes * 60 + seconds,
     };
   }
   return {
-    date: `${m[1]}-${m[2]}-${m[3]}`,
+    date,
     cityCode: m[4],
     seq: Number.parseInt(m[5], 10),
     offsetSeconds: undefined,
@@ -1085,7 +1093,7 @@ export function parseRefId(refId: string): ParsedRefId {
 - [ ] **Step 4: 运行确认通过**
 
 Run: `cd packages/core && pnpm vitest run test/refid.test.ts`
-Expected: 全部 PASS（15 tests）
+Expected: 全部 PASS（17 tests）
 
 - [ ] **Step 5: Commit**
 
@@ -1180,3 +1188,4 @@ git commit -m "feat(core): public exports and cross-module integration test"
   - Task 5（执行时）：`MediaRef` 的 `sha256`/`capturedAt` 改为引用 Task 2 加固后导出的 `Sha256`/`EpochMs`，不再内联重写同一哈希规则（即 Task 2 评审「导出以供 Task 5 引用」的落地）。上方 Task 5 代码块已同步。
   - Task 5（质量评审后追加）：`BundleV1` 由 `z.object` 改为 `z.strictObject`——bundle 是证据传输格式，未知顶层键静默剥离会把「不完整证据当完整证据」摄入；前向兼容由 `schemaVersion: z.literal(1)` 版本门槛负责，不需要 strip-mode。新增「拒绝未知顶层字段」测试。嵌套实体的 strip 行为保留（Task 2 评审已记录该取舍），Plan 2/3 协调前不再收紧。上方代码块已同步。
   - Task 6（规格评审发现的计划内缺陷）：`#T` 是 MM:SS（分钟可为 00–99，上限 #T99:59 = 5999s），但 `parseRefId` 原守卫 `minutes > 59` 会拒绝 make 侧合法产出的 60–99 分钟，往返在偏移 ≥3600s 时断裂。守卫改为 `minutes > 99 || seconds > 59`（分钟两位数字已被正则限定 ≤99，99 分支为防御性冗余）。新增 3600s / 5999s 往返测试。上方代码块已同步。
+  - Task 6（质量评审后追加）：make/parse 两侧均增加日历日期校验（复用 Task 2 导出的 `IsoDate` = `z.iso.date()`），拒绝 `2026-02-31` 这类格式合法但不存在的日期——引用 ID 是学术输出的引用表面，`OF-20260231` 会被印进论文。`IsoDate` 随之导出。新增 make/parse 各一个日历拒绝测试。上方代码块已同步。
