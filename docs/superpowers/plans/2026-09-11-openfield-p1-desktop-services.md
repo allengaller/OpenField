@@ -193,6 +193,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A11 — verify 报告健壮性（Task 9 质量评审 CHANGES_REQUIRED，2026-09-11）：** runVerify 两处异常路径违背"报告生成器"契约（收集 issues 而非抛出；验证工具不得静默漏检），修正后正文已就地更新：① 孤儿目录循环中未防护的 `stat(full)`（悬空符号链接 / EACCES / readdir 与 stat 之间条目消失）会使整个报告 reject、丢失链与其他全部检查结果——改为 `.catch(() => null)` 后跳过该条目；② `readdir(originalsRoot)` 失败被静默吞掉，"未检出孤儿"与"未检查孤儿"不可区分——改为向报告追加一条 `kind: 'unreadable'`（`path` = originalsRoot，message 注明孤儿检查未执行），`VerifyIssue` / `VerifyReport` 接口不变。测试增加"originals 整目录消失 → original-missing 与目录不可读均入报告、不抛出"用例，verify 6 个，全套 46 个。
 
+**A12 — purge 删除前恢复封存件可写位（Task 7 评审遗留事项，2026-09-11）：** ingest 封存时把原始件 chmod 0444；POSIX 的 unlink 只看父目录写位、`rmSync` 可直接删除，但 Windows 上文件只读属性会阻止删除。Task 10 的文件删除循环在 `rmSync` 前先 `readdirSync` + `chmodSync(0o644)` 恢复目录内文件可写位（目录缺失则交给 `rmSync` 的 force），POSIX 上无害、Windows 上必要。正文已就地更新。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -2455,7 +2457,7 @@ Expected: FAIL（模块不存在）。
 ```ts
 import type Database from 'better-sqlite3-multiple-ciphers';
 import { computePayloadHash } from '@openfield/core';
-import { rmSync } from 'node:fs';
+import { chmodSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendEntry } from './evidence';
 import { listArtifactsByEncounter, listConsentsByEncounter, listMemos } from './repos';
@@ -2494,7 +2496,13 @@ export function purgeSubject(
 
   // 先删文件再删库：若 DB 事务失败，隐私已消失、登记残留会被 verify 以 original-missing 可见报告
   for (const a of artifacts) {
-    rmSync(join(originalsRoot, a.id), { recursive: true, force: true });
+    const dir = join(originalsRoot, a.id);
+    try {
+      for (const f of readdirSync(dir)) chmodSync(join(dir, f), 0o644); // A12：封存件 0444，先恢复可写（Windows 只读位阻止删除；POSIX 无害）
+    } catch {
+      // 目录缺失等：交给 rmSync 的 force 处理
+    }
+    rmSync(dir, { recursive: true, force: true });
   }
 
   const tx = db.transaction(() => {
