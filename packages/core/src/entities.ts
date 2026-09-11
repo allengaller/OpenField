@@ -36,7 +36,7 @@ export const CityCode = z.string().regex(/^[A-Z]{3}$/);
 export type CityCode = z.infer<typeof CityCode>;
 
 export const Sha256 = z.string().regex(/^[0-9a-f]{64}$/);
-const IsoDate = z.iso.date();
+export const IsoDate = z.iso.date();
 export const EpochMs = z.number().int().positive();
 const Id = z.string().min(1);
 

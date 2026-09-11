@@ -21,6 +21,9 @@ describe('makeRefId', () => {
   it('坏日期 → 抛错', () => {
     expect(() => makeRefId({ date: '2026-9-9', cityCode: 'KMG', seq: 1 })).toThrow(/YYYY-MM-DD/);
   });
+  it('不存在的日历日期 → 抛错', () => {
+    expect(() => makeRefId({ date: '2026-02-31', cityCode: 'KMG', seq: 1 })).toThrow(/YYYY-MM-DD/);
+  });
   it('seq 超过 999 → 抛错', () => {
     expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1000 })).toThrow(/seq/);
   });
@@ -60,5 +63,8 @@ describe('parseRefId', () => {
   });
   it('非法分钟 #T99:99 → 抛错', () => {
     expect(() => parseRefId('OF-20260909-KMG-003#T99:99')).toThrow(/无法解析/);
+  });
+  it('不存在的日历日期 → 抛错', () => {
+    expect(() => parseRefId('OF-20260231-KMG-003')).toThrow(/无法解析/);
   });
 });

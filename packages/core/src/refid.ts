@@ -1,4 +1,4 @@
-import { CityCode } from './entities';
+import { CityCode, IsoDate } from './entities';
 
 export interface RefIdParts {
   date: string;
@@ -16,8 +16,8 @@ export interface ParsedRefId {
 
 export function makeRefId(parts: RefIdParts): string {
   const city = CityCode.parse(parts.cityCode);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(parts.date)) {
-    throw new Error(`日期格式须为 YYYY-MM-DD：${parts.date}`);
+  if (!IsoDate.safeParse(parts.date).success) {
+    throw new Error(`日期格式须为 YYYY-MM-DD（含日历有效性）：${parts.date}`);
   }
   if (!Number.isInteger(parts.seq) || parts.seq < 0 || parts.seq > 999) {
     throw new Error(`seq 须为 0-999 整数：${parts.seq}`);
@@ -35,19 +35,21 @@ export function makeRefId(parts: RefIdParts): string {
 export function parseRefId(refId: string): ParsedRefId {
   const m = /^OF-(\d{4})(\d{2})(\d{2})-([A-Z]{3})-(\d{3})(?:#T(\d{2}):(\d{2}))?$/.exec(refId);
   if (!m || !m[1] || !m[2] || !m[3] || !m[4] || !m[5]) throw new Error(`无法解析引用 ID：${refId}`);
+  const date = `${m[1]}-${m[2]}-${m[3]}`;
+  if (!IsoDate.safeParse(date).success) throw new Error(`无法解析引用 ID：${refId}`);
   if (m[6] !== undefined) {
     const minutes = Number.parseInt(m[6], 10);
     const seconds = Number.parseInt(m[7] ?? '0', 10);
     if (minutes > 99 || seconds > 59) throw new Error(`无法解析引用 ID：${refId}`);
     return {
-      date: `${m[1]}-${m[2]}-${m[3]}`,
+      date,
       cityCode: m[4],
       seq: Number.parseInt(m[5], 10),
       offsetSeconds: minutes * 60 + seconds,
     };
   }
   return {
-    date: `${m[1]}-${m[2]}-${m[3]}`,
+    date,
     cityCode: m[4],
     seq: Number.parseInt(m[5], 10),
     offsetSeconds: undefined,
