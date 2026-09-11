@@ -205,6 +205,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A17 — E2E 入口路径 ESM 化（Task 13 执行期发现，2026-09-12）：** apps/desktop 为 `"type": "module"`，Playwright 1.63 对该包下的 `.ts` 测试按 ESM 加载，`__dirname` 未定义——而 `@types/node` 的全局声明使 tsc 不报错，属"类型通过、运行时崩"陷阱。修正：`smoke.e2e.ts` 以 `const here = dirname(fileURLToPath(import.meta.url))` 解析 `../out/main/index.js`，弃用 `__dirname`。
 
+**A18 — Playwright testMatch 与 #report 断言空格（Task 13 执行期发现，2026-09-12）：** ① Playwright 1.63 默认 `testMatch` 为 `**/*.@(spec|test).?(c|m)[jt]s?(x)`，不匹配计划指定的 `smoke.e2e.ts` 文件名——配置与文件名互相矛盾，运行即 "No tests found"。修正：config 增 `testMatch: '**/*.e2e.ts'`。② `#report` 由 renderer 以 `JSON.stringify(report, null, 2)` 渲染（Task 12 正文即如此），冒烟断言 `"chainOk":true`/`"issues":[]` 永不匹配。修正：改为 `"chainOk": true`/`"issues": []`。其余与正文逐字一致；E2E `1 passed`，全量回归 core 126 + desktop 64。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -3457,6 +3459,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: 'e2e',
+  testMatch: '**/*.e2e.ts', // A18：默认 testMatch 不匹配 *.e2e.ts 文件名
   timeout: 120_000,
   forbidOnly: !!process.env.CI,
 });
@@ -3509,8 +3512,8 @@ test('P1 冒烟：建库 → 登记 → 扫描 → 确认 → 校验 → 引用'
     await expect(win.locator('#pending')).not.toContainText('interview.wav');
 
     await win.click('#btn-verify');
-    await expect(win.locator('#report')).toContainText('"chainOk":true');
-    await expect(win.locator('#report')).toContainText('"issues":[]');
+    await expect(win.locator('#report')).toContainText('"chainOk": true');
+    await expect(win.locator('#report')).toContainText('"issues": []');
 
     await expect(win.locator('#cite-art')).not.toHaveValue('');
     await win.click('#btn-cite');
