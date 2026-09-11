@@ -39,10 +39,14 @@ export type CityCode = z.infer<typeof CityCode>;
 
 export const Sha256 = z.string().regex(/^[0-9a-f]{64}$/);
 export const IsoDate = z.iso.date();
-export const EpochMs = z.number().int().positive();
-// 证据链 actor：非空、≤128 字符、不含 '|' 或换行符。
-// '|' 是 entryHash 前像的字段分隔符，actor 一旦含 '|' 即产生编码歧义。
-export const Actor = z.string().min(1).max(128).regex(/^[^|\r\n]*$/);
+// 上界 MAX_SAFE_INTEGER：≥2^53 的整数 JSON 往返丢精度，证据哈希必须跨序列化逐字节稳定。
+export const EpochMs = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+// 链安全字符串：不含 '|'、'\r'、'\n'。'|' 是 entryHash 前像的字段分隔符，
+// 含 '|' 的值会让管道拼接编码产生歧义（payloadHash 64-hex、action 枚举同样依赖此前提）。
+export const ChainSafeString = z.string().regex(/^[^|\r\n]*$/);
+export type ChainSafeString = z.infer<typeof ChainSafeString>;
+// 链 actor：非空、≤128 字符，且必须链安全（见 ChainSafeString）。
+export const Actor = ChainSafeString.min(1).max(128);
 export const Id = z.string().min(1);
 
 // ---------- README 六实体 ----------

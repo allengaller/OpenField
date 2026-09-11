@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CityCode, FieldEvent, Encounter, Artifact, Participant, EvidenceAction, EvidenceEntry, ConsentRecord,
+  CityCode, ChainSafeString, EpochMs, FieldEvent, Encounter, Artifact, Participant, EvidenceAction, EvidenceEntry, ConsentRecord,
   Memo, InboxItem, TimeSyncRecord,
 } from '../src/entities';
 
@@ -28,6 +28,30 @@ describe('FieldEvent', () => {
 describe('CityCode', () => {
   it.each(['kmg', 'KM', 'KMG1', ''])('拒绝非法城市码 %s', (bad) => {
     expect(CityCode.safeParse(bad).success).toBe(false);
+  });
+});
+
+describe('EpochMs', () => {
+  it('接受 Number.MAX_SAFE_INTEGER（2^53 − 1，安全整数上界恰好过）', () => {
+    expect(EpochMs.safeParse(Number.MAX_SAFE_INTEGER).success).toBe(true);
+  });
+  it('拒绝 2^53（9007199254740992，JSON 往返丢精度）', () => {
+    expect(EpochMs.safeParse(9007199254740992).success).toBe(false);
+  });
+  it('拒绝 1e30', () => {
+    expect(EpochMs.safeParse(1e30).success).toBe(false);
+  });
+});
+
+describe('ChainSafeString', () => {
+  it('接受空串（非空是 Actor 的约束，链安全本身不要求）', () => {
+    expect(ChainSafeString.safeParse('').success).toBe(true);
+  });
+  it('接受普通标识符 bundle:abc', () => {
+    expect(ChainSafeString.safeParse('bundle:abc').success).toBe(true);
+  });
+  it.each(['a|b', 'a\rb', 'a\nb'])('拒绝含管道符或换行符 %s', (bad) => {
+    expect(ChainSafeString.safeParse(bad).success).toBe(false);
   });
 });
 

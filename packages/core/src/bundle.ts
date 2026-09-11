@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Actor, FieldEvent, Encounter, Participant, ConsentRecord, Memo, Gps, Sha256, EpochMs, Id } from './entities';
+import { ChainSafeString, FieldEvent, Encounter, Participant, ConsentRecord, Memo, Gps, Sha256, EpochMs, Id } from './entities';
 
 export const MediaRef = z.object({
   filename: z.string().min(1),
@@ -15,9 +15,9 @@ export type MediaRef = z.infer<typeof MediaRef>;
 
 export const BundleV1 = z.strictObject({
   schemaVersion: z.literal(1),
-  // id 会被服务层拼进入链 actor（'bundle:'+id），复用 Actor 约束保证哈希前像无歧义；
+  // id 会被服务层拼进入链 actor（'bundle:'+id），故必须是链安全字符串（见 entities.ChainSafeString）；
   // 上界 121 = 128 − len('bundle:')，保证派生 actor 恒过 Actor.parse。
-  id: Actor.max(121),
+  id: ChainSafeString.min(1).max(121),
   deviceId: z.string().min(1),
   createdAt: EpochMs,
   events: z.array(FieldEvent),

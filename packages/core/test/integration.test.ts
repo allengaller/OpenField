@@ -97,7 +97,7 @@ describe('公共导出面', () => {
     const expected = [
       'CORE_VERSION',
       'ArtifactType', 'MemoType', 'ConsentTemplateType', 'InboxStatus', 'EvidenceAction',
-      'Gps', 'CityCode', 'Sha256', 'IsoDate', 'EpochMs', 'Id', 'Actor',
+      'Gps', 'CityCode', 'Sha256', 'IsoDate', 'EpochMs', 'Id', 'ChainSafeString', 'Actor',
       'FieldEvent', 'Encounter', 'Artifact', 'Participant', 'Memo', 'ConsentRecord',
       'InboxItem', 'TimeSyncRecord', 'EvidenceEntry',
       'sha256Hex', 'stableStringify', 'computePayloadHash',
