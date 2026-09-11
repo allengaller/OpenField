@@ -45,6 +45,16 @@ describe('parseRefId', () => {
     const id = makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 42, offsetSeconds: 61 });
     expect(parseRefId(id)).toEqual({ date: '2026-09-09', cityCode: 'KMG', seq: 42, offsetSeconds: 61 });
   });
+  it('偏移 3600s → #T60:00 往返', () => {
+    const id = makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 7, offsetSeconds: 3600 });
+    expect(id).toBe('OF-20260909-KMG-007#T60:00');
+    expect(parseRefId(id).offsetSeconds).toBe(3600);
+  });
+  it('偏移 5999s → #T99:59 往返', () => {
+    const id = makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 7, offsetSeconds: 5999 });
+    expect(id).toBe('OF-20260909-KMG-007#T99:59');
+    expect(parseRefId(id).offsetSeconds).toBe(5999);
+  });
   it('垃圾输入 → 抛错', () => {
     expect(() => parseRefId('OF-2026-KMG-1')).toThrow(/无法解析/);
   });

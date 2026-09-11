@@ -38,7 +38,7 @@ export function parseRefId(refId: string): ParsedRefId {
   if (m[6] !== undefined) {
     const minutes = Number.parseInt(m[6], 10);
     const seconds = Number.parseInt(m[7] ?? '0', 10);
-    if (minutes > 59 || seconds > 59) throw new Error(`无法解析引用 ID：${refId}`);
+    if (minutes > 99 || seconds > 59) throw new Error(`无法解析引用 ID：${refId}`);
     return {
       date: `${m[1]}-${m[2]}-${m[3]}`,
       cityCode: m[4],
