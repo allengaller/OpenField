@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -60,6 +60,15 @@ describe('makeCitation', () => {
     const r5 = await ingestFixture('a5.wav');
     expect(() => makeCitation(db, { artifactId: r5.artifact.id, actor: 'desktop' })).toThrow(/未挂访谈/);
   });
+
+  it('重复引用同一 artifact 幂等返回既有 refId，不追加 EXPORT（A15）', async () => {
+    const r = await ingestFixture('a6.wav', T0 + 150_000, 'enc-1');
+    const first = makeCitation(db, { artifactId: r.artifact.id, actor: 'desktop' });
+    const chainLen = listEvidenceEntries(db).length;
+    const second = makeCitation(db, { artifactId: r.artifact.id, actor: 'desktop' });
+    expect(second.refId).toBe(first.refId);
+    expect(listEvidenceEntries(db).length).toBe(chainLen);
+  });
 });
 
 describe('exportBackup / readBackup', () => {
@@ -75,5 +84,13 @@ describe('exportBackup / readBackup', () => {
 
   it('错误口令解包直接失败（GCM 认证拒绝）', () => {
     expect(() => readBackup(outPath, 'wrong-pass-999')).toThrow();
+  });
+
+  it('残留的临时 vault 文件不阻塞备份（A15）', () => {
+    const retryPath = join(paths.backupsDir, 'retry.ofbackup');
+    writeFileSync(`${retryPath}.tmp-vault.db`, 'stale-from-crash');
+    exportBackup(db, paths, TEST_PASSPHRASE, retryPath);
+    expect(existsSync(`${retryPath}.tmp-vault.db`)).toBe(false);
+    expect(existsSync(retryPath)).toBe(true);
   });
 });

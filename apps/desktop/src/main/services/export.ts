@@ -20,6 +20,7 @@ export function makeCitation(
 ): { refId: string; artifact: ArtifactRecord } {
   const artifact = getArtifact(db, input.artifactId);
   if (!artifact) throw new ExportError('io', `artifact 不存在：${input.artifactId}`);
+  if (artifact.refId) return { refId: artifact.refId, artifact }; // A15：引用 ID 一经签发不可变更，重复调用幂等返回
   if (!artifact.encounterId) throw new ExportError('no-encounter', '采集物未挂访谈，无法定位引用时间与城市');
   const encounter = getEncounter(db, artifact.encounterId);
   if (!encounter) throw new ExportError('no-encounter', `encounter 不存在：${artifact.encounterId}`);
@@ -59,8 +60,9 @@ const MAGIC = Buffer.from('OFBK1', 'ascii');
 export function exportBackup(db: Database.Database, paths: VaultPaths, passphrase: string, outPath: string): void {
   if (existsSync(outPath)) throw new ExportError('io', `备份目标已存在：${outPath}`);
   const tmpDb = `${outPath}.tmp-vault.db`;
-  backupVault(db, tmpDb);
   try {
+    rmSync(tmpDb, { force: true }); // A15：清掉上次崩溃残留的临时库，否则 backupVault 会因目标已存在而失败
+    backupVault(db, tmpDb);
     const zip = new AdmZip();
     zip.addFile('vault.db', readFileSync(tmpDb));
     zip.addLocalFolder(paths.originalsRoot, 'originals');
