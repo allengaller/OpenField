@@ -1,0 +1,3320 @@
+# OpenField P1 — Plan 2: 桌面服务层（Electron main + SQLCipher + 导入流 + E2E）实现计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 在 `apps/desktop` 实现规格 §1 的五个主进程服务（VaultService / IngestService / InboxWatcher / VerifyService / ExportService）+ PIPL 级联清除 + §4 导入流 + §5 错误处理 + §6 E2E 冒烟，服务层为可在 Node 直接测试的纯 TS 模块，Electron 只做薄壳。
+
+**Architecture:** 服务层（`src/main/services/`）是框架无关的 TS 模块，持有 better-sqlite3 句柄操作 SQLCipher 加密库，单元测试在 Node 环境直接跑（不启动 Electron）。Electron 壳（main/preload/renderer）只负责装配服务与暴露类型化 IPC。证据链追加与业务写库同事务；原始件封存走 temp+rename 原子写 + chmod 只读。
+
+**Tech Stack:** TypeScript 5（strict）、Electron 44、electron-vite 5、better-sqlite3-multiple-ciphers 13（内置 SQLCipher 兼容加密，N-API 预编译二进制，无需 rebuild）、chokidar 5、@hapi/sntp 4、adm-zip（纯 JS）、@playwright/test 1.63（Electron E2E）、zod 4、vitest 3。
+
+**规格来源:** `docs/superpowers/specs/2026-09-09-openfield-p1-architecture-design.md`（本计划覆盖其 §1 桌面服务、§2.3 原始件封存、§2.4 TIME_SYNC、§3 数据模型落库、§4 导入流、§5 错误处理、§6 E2E；core 包已是 Plan 1 交付物，手机端属 Plan 3）
+
+---
+
+## Global Constraints
+
+- TypeScript strict + `verbatimModuleSyntax`（`tsconfig.base.json` 已定，不得放宽）。
+- core 包（`@openfield/core`）的 zod schema 是唯一数据定义；vault 表列与之逐一对应（camelCase → snake_case），读写边界用 zod 校验。
+- `real_name` 只允许进 `participant_identity` 表；任何分析层查询默认不 JOIN 该表（PRINCIPLES §2.4）。
+- `evidence_log` append-only：本计划内任何代码不得 UPDATE/DELETE 该表。
+- 原始件封存：temp 文件 + fsync + rename + `chmod 0444`；一切"编辑"产生新文件，v1 永不改动。
+- 破坏性操作（PURGE_SUBJECT）必须显式确认令牌：`confirmToken === pseudonym`（PRINCIPLES §3 confirm-before-acting）。
+- Electron 安全基线：`contextIsolation` 保持默认开启、`sandbox: true`、不开 `nodeIntegration`。
+- 版本钉：Electron `^44.0.0`、electron-vite `^5.0.0`、better-sqlite3-multiple-ciphers `^13.0.0`、chokidar `^5.0.0`、@hapi/sntp `^4.0.0`、adm-zip `^0.5.16`、playwright `^1.63.0`、zod `^4.0.0`、vitest `^3.0.0`、typescript `^5.6.0`。
+- pnpm 11 依赖构建脚本走 `pnpm-workspace.yaml` 的 `allowBuilds` 映射（`electron: true` 必须补上）。
+- 提交信息：conventional commits，作用域 `desktop`（如 `feat(desktop): …`）。
+- P1 macOS 优先：iCloud 路径语义与 `chmod` 只读按 macOS 处理（Windows 适配留待后续计划）。
+
+## 文件结构
+
+```
+OpenField/
+├─ pnpm-workspace.yaml            # 修改：allowBuilds 增加 electron
+├─ apps/desktop/
+│  ├─ package.json
+│  ├─ tsconfig.json
+│  ├─ electron.vite.config.ts
+│  ├─ vitest.config.ts
+│  ├─ playwright.config.ts
+│  ├─ src/
+│  │  ├─ shared/ipc.ts            # IpcResult 信封类型（main/preload/renderer 共用）
+│  │  ├─ main/
+│  │  │  ├─ index.ts              # Electron 入口：装配 + 窗口
+│  │  │  ├─ home.ts               # --openfield-home 解析
+│  │  │  ├─ state.ts              # AppState：路径 + db 持有 + 目录准备
+│  │  │  ├─ ipc.ts                # IPC handler 注册（zod 入参校验 + 信封返回）
+│  │  │  ├─ watcher.ts            # chokidar 监听 inbox → 触发 scanOnce
+│  │  │  └─ services/
+│  │  │     ├─ migrations.ts      # schema 版本迁移（v1 全量建表）
+│  │  │     ├─ vault.ts           # VaultService：SQLCipher 打开/关闭/备份
+│  │  │     ├─ repos.ts           # 实体仓储（zod 校验边界 + identity 隔离）
+│  │  │     ├─ evidence.ts        # appendEntry + TIME_SYNC
+│  │  │     ├─ registry.ts        # Event/Encounter 创建入链 + 每日日志 + MEMO_CONFIRM
+│  │  │     ├─ ingest.ts          # IngestService：哈希→封存→登记（幂等）
+│  │  │     ├─ inbox.ts           # InboxService：scanOnce 分类 + bundle 应用 + 隔离区
+│  │  │     ├─ verify.ts          # VerifyService：链校验 + 原始件重算 + 孤儿
+│  │  │     ├─ purge.ts           # PurgeService：PIPL 级联清除
+│  │  │     └─ export.ts          # ExportService：引用生成 + 加密备份
+│  │  ├─ preload/index.ts         # contextBridge → window.openfield
+│  │  └─ renderer/
+│  │     ├─ index.html
+│  │     └─ src/
+│  │        ├─ main.ts            # 最小状态页（vault 开合 / 扫描 / 校验）
+│  │        └─ global.d.ts        # window.openfield 类型
+│  ├─ test/
+│  │  ├─ helpers.ts               # makeTestVault 等测试基建
+│  │  ├─ smoke.test.ts
+│  │  ├─ migrations.test.ts
+│  │  ├─ vault.test.ts
+│  │  ├─ repos.test.ts
+│  │  ├─ evidence.test.ts
+│  │  ├─ registry.test.ts
+│  │  ├─ ingest.test.ts
+│  │  ├─ inbox.test.ts
+│  │  ├─ verify.test.ts
+│  │  ├─ purge.test.ts
+│  │  ├─ export.test.ts
+│  │  └─ shell.test.ts            # Task 12：AppState / IPC handlers / watcher 单测
+│  └─ e2e/
+│     └─ smoke.e2e.ts             # Playwright Electron 冒烟
+```
+
+---
+
+### Task 1: 桌面应用脚手架
+
+**Files:**
+- Modify: `pnpm-workspace.yaml`
+- Create: `apps/desktop/package.json`, `apps/desktop/tsconfig.json`, `apps/desktop/electron.vite.config.ts`, `apps/desktop/vitest.config.ts`
+- Create: `apps/desktop/src/shared/ipc.ts`, `apps/desktop/test/smoke.test.ts`
+
+**Interfaces:**
+- Consumes: `@openfield/core`（workspace 依赖，`CORE_VERSION`）
+- Produces: `apps/desktop` 包骨架；`src/shared/ipc.ts` 的 `IpcResult<T>` 信封类型（Task 12 的 IPC 与 renderer 均复用）
+
+- [ ] **Step 1: pnpm-workspace.yaml 增加 electron 构建许可**
+
+`pnpm-workspace.yaml` 整体替换为：
+```yaml
+packages:
+  - packages/*
+  - apps/*
+
+allowBuilds:
+  esbuild: true
+  electron: true
+```
+
+- [ ] **Step 2: 写 apps/desktop 包配置**
+
+`apps/desktop/package.json`:
+```json
+{
+  "name": "@openfield/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "e2e": "electron-vite build && playwright test"
+  },
+  "dependencies": {
+    "@openfield/core": "workspace:*",
+    "@hapi/sntp": "^4.0.0",
+    "adm-zip": "^0.5.16",
+    "better-sqlite3-multiple-ciphers": "^13.0.0",
+    "chokidar": "^5.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^24.0.0",
+    "electron": "^44.0.0",
+    "electron-vite": "^5.0.0",
+    "playwright": "^1.63.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}
+```
+（说明：better-sqlite3-multiple-ciphers 自带 TypeScript 类型；若 typecheck 报类型缺失，属执行期偏差，安装 `@types/better-sqlite3` 并记录到自检附录。）
+
+`apps/desktop/tsconfig.json`:
+```json
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ESNext", "DOM"]
+  },
+  "include": ["src", "test", "e2e", "electron.vite.config.ts", "vitest.config.ts", "playwright.config.ts"]
+}
+```
+
+`apps/desktop/electron.vite.config.ts`:
+```ts
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
+import { resolve } from 'node:path';
+
+export default defineConfig({
+  main: {
+    // 只外置原生模块；@openfield/core 与其余依赖全部打包进 out/main/index.js
+    plugins: [externalizeDepsPlugin({ include: ['better-sqlite3-multiple-ciphers'] })],
+    build: { rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts') } } },
+  },
+  preload: {
+    build: { rollupOptions: { input: { index: resolve(__dirname, 'src/preload/index.ts') } } },
+  },
+  renderer: {
+    build: { rollupOptions: { input: { index: resolve(__dirname, 'src/renderer/index.html') } } },
+  },
+});
+```
+
+`apps/desktop/vitest.config.ts`:
+```ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: { environment: 'node' },
+});
+```
+
+- [ ] **Step 3: 写共享类型与冒烟测试**
+
+`apps/desktop/src/shared/ipc.ts`:
+```ts
+export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string };
+```
+
+`apps/desktop/test/smoke.test.ts`:
+```ts
+import { describe, it, expect } from 'vitest';
+import { CORE_VERSION } from '@openfield/core';
+
+describe('脚手架接线', () => {
+  it('workspace 依赖 @openfield/core 可解析', () => {
+    expect(CORE_VERSION).toBe('0.1.0');
+  });
+});
+```
+
+- [ ] **Step 4: 安装并验证**
+
+Run: `pnpm install && pnpm --filter @openfield/desktop typecheck && pnpm --filter @openfield/desktop test && pnpm --filter @openfield/desktop build`
+Expected: 安装成功（electron 二进制经 allowBuilds 下载）；typecheck 无错误；`1 passed`；`out/main/index.js`、`out/preload/index.js`、`out/renderer/index.html` 均产出。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pnpm-workspace.yaml apps/desktop
+git commit -m "chore(desktop): scaffold electron app with electron-vite and sqlcipher deps"
+```
+
+---
+
+### Task 2: schema 迁移（migrations.ts）
+
+**Files:**
+- Create: `apps/desktop/src/main/services/migrations.ts`
+- Test: `apps/desktop/test/migrations.test.ts`
+
+**Interfaces:**
+- Consumes: `better-sqlite3-multiple-ciphers` 的 `Database.Database` 类型
+- Produces: `applyMigrations(db: Database.Database): void`（幂等，版本记录在 `schema_migrations` 表）。Task 3 的 `openVault` 在打开后调用。
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/migrations.test.ts`:
+```ts
+import { describe, it, expect, afterAll } from 'vitest';
+import Database from 'better-sqlite3-multiple-ciphers';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { applyMigrations } from '../src/main/services/migrations';
+
+const dir = mkdtempSync(join(tmpdir(), 'of-mig-'));
+const db = new Database(join(dir, 'plain.db'));
+afterAll(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+
+function tableNames(db: Database.Database): string[] {
+  return (db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+}
+
+describe('applyMigrations', () => {
+  it('v1 建出全部 11 张表并记录版本', () => {
+    applyMigrations(db);
+    const names = tableNames(db);
+    for (const t of ['field_events', 'encounters', 'artifacts', 'participants', 'participant_identity', 'consent_records', 'memos', 'inbox_items', 'time_sync_records', 'evidence_log', 'schema_migrations']) {
+      expect(names).toContain(t);
+    }
+    const version = db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number };
+    expect(version.v).toBe(1);
+  });
+
+  it('重复执行幂等', () => {
+    applyMigrations(db);
+    expect(() => applyMigrations(db)).not.toThrow();
+    const count = db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  it('artifacts.sha256 唯一、ref_id 唯一索引存在', () => {
+    db.prepare("INSERT INTO artifacts (id, type, sha256, size, mime, captured_at, device_id, version, original_path) VALUES ('a1','audio','" + 'a'.repeat(64) + "',1,'audio/wav',1,'d',1,'/tmp/x')").run();
+    expect(() =>
+      db.prepare("INSERT INTO artifacts (id, type, sha256, size, mime, captured_at, device_id, version, original_path) VALUES ('a2','audio','" + 'a'.repeat(64) + "',1,'audio/wav',1,'d',1,'/tmp/y')").run(),
+    ).toThrow();
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- migrations`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/migrations.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+
+export interface Migration {
+  version: number;
+  sql: string;
+}
+
+export const MIGRATIONS: Migration[] = [
+  {
+    version: 1,
+    sql: `
+CREATE TABLE field_events (
+  id TEXT PRIMARY KEY,
+  date TEXT NOT NULL,
+  city_code TEXT NOT NULL,
+  location_name TEXT NOT NULL,
+  gps_lat REAL,
+  gps_lng REAL,
+  context_note TEXT
+);
+CREATE TABLE encounters (
+  id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL REFERENCES field_events(id),
+  participant_ref TEXT NOT NULL,
+  sampling_reason TEXT NOT NULL,
+  consent_record_id TEXT,
+  started_at INTEGER NOT NULL,
+  note TEXT
+);
+CREATE TABLE artifacts (
+  id TEXT PRIMARY KEY,
+  encounter_id TEXT REFERENCES encounters(id),
+  event_id TEXT REFERENCES field_events(id),
+  type TEXT NOT NULL,
+  sha256 TEXT NOT NULL UNIQUE,
+  size INTEGER NOT NULL,
+  mime TEXT NOT NULL,
+  captured_at INTEGER NOT NULL,
+  gps_lat REAL,
+  gps_lng REAL,
+  device_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  ref_id TEXT,
+  original_path TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_artifacts_ref_id ON artifacts(ref_id);
+CREATE TABLE participants (
+  pseudonym TEXT PRIMARY KEY,
+  industry TEXT,
+  region TEXT,
+  referral_chain TEXT,
+  consent_scope TEXT
+);
+CREATE TABLE participant_identity (
+  pseudonym TEXT PRIMARY KEY REFERENCES participants(pseudonym),
+  real_name TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE consent_records (
+  id TEXT PRIMARY KEY,
+  encounter_id TEXT NOT NULL REFERENCES encounters(id),
+  template_type TEXT NOT NULL,
+  signature_artifact_id TEXT,
+  verbal_consent_artifact_id TEXT,
+  scope TEXT NOT NULL,
+  withdrawn_at INTEGER
+);
+CREATE TABLE memos (
+  id TEXT PRIMARY KEY,
+  linked_artifact_ids TEXT NOT NULL,
+  type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  confirmed_at INTEGER
+);
+CREATE TABLE inbox_items (
+  id TEXT PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  detected_at INTEGER NOT NULL,
+  sha256 TEXT,
+  suggested_event_id TEXT,
+  suggested_encounter_id TEXT,
+  status TEXT NOT NULL
+);
+CREATE TABLE time_sync_records (
+  id TEXT PRIMARY KEY,
+  checked_at INTEGER NOT NULL,
+  ntp_server TEXT NOT NULL,
+  offset_ms INTEGER NOT NULL
+);
+CREATE TABLE evidence_log (
+  seq INTEGER PRIMARY KEY,
+  ts INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  entry_hash TEXT NOT NULL
+);
+`,
+  },
+];
+
+export function applyMigrations(db: Database.Database): void {
+  db.exec(
+    'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)',
+  );
+  const rows = db.prepare('SELECT version FROM schema_migrations').all() as { version: number }[];
+  const applied = new Set(rows.map((r) => r.version));
+  for (const m of MIGRATIONS) {
+    if (applied.has(m.version)) continue;
+    db.transaction(() => {
+      db.exec(m.sql);
+      db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(m.version, Date.now());
+    })();
+  }
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- migrations`
+Expected: PASS（3 个测试）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/migrations.ts apps/desktop/test/migrations.test.ts
+git commit -m "feat(desktop): schema migrations v1 with all nine domain tables and evidence log"
+```
+
+---
+
+### Task 3: VaultService（SQLCipher 打开/关闭/备份）
+
+**Files:**
+- Create: `apps/desktop/src/main/services/vault.ts`
+- Test: `apps/desktop/test/vault.test.ts`, `apps/desktop/test/helpers.ts`
+
+**Interfaces:**
+- Consumes: `applyMigrations`（Task 2）、`better-sqlite3-multiple-ciphers`
+- Produces:
+  - `interface VaultPaths { vaultDb: string; originalsRoot: string; inboxDir: string; quarantineDir: string; backupsDir: string }`
+  - `resolveVaultPaths(home: string): VaultPaths`
+  - `class VaultError extends Error { code: 'wrong-key' | 'io' }`
+  - `openVault(paths: VaultPaths, passphrase: string, create: boolean): Database.Database`（内部完成 SQLCipher 配置 + 迁移 + 错口令探测）
+  - `closeVault(db): void`
+  - `backupVault(db, outPath: string): void`（`VACUUM INTO` 加密备份）
+  - `makeTestVault(): { db: Database.Database; paths: VaultPaths; home: string }`（后续所有任务的测试基建）
+
+- [ ] **Step 1: 写测试基建与失败测试**
+
+`apps/desktop/test/helpers.ts`:
+```ts
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { openVault, resolveVaultPaths, type VaultPaths } from '../src/main/services/vault';
+
+export const TEST_PASSPHRASE = 'test-passphrase-8';
+
+export function makeTestVault(): { db: Database.Database; paths: VaultPaths; home: string } {
+  const home = mkdtempSync(join(tmpdir(), 'of-vault-'));
+  const paths = resolveVaultPaths(home);
+  const db = openVault(paths, TEST_PASSPHRASE, true);
+  for (const dir of [paths.originalsRoot, paths.inboxDir, paths.quarantineDir, paths.backupsDir]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  return { db, paths, home };
+}
+
+export function cleanupTestVault(home: string): void {
+  rmSync(home, { recursive: true, force: true });
+}
+```
+
+`apps/desktop/test/vault.test.ts`:
+```ts
+import { describe, it, expect, afterAll } from 'vitest';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { cleanupTestVault, makeTestVault, TEST_PASSPHRASE } from './helpers';
+import { backupVault, closeVault, openVault, resolveVaultPaths, VaultError } from '../src/main/services/vault';
+
+const home = makeTestVault().home;
+afterAll(() => cleanupTestVault(home));
+
+describe('openVault', () => {
+  it('创建 → 关闭 → 重开，数据仍在（加密持久化）', () => {
+    const paths = resolveVaultPaths(join(home, 'v1'));
+    const db = openVault(paths, TEST_PASSPHRASE, true);
+    db.prepare("INSERT INTO field_events (id, date, city_code, location_name) VALUES ('e1','2026-09-09','KMG','昆明')").run();
+    closeVault(db);
+    expect(existsSync(paths.vaultDb)).toBe(true);
+
+    const reopened = openVault(paths, TEST_PASSPHRASE, false);
+    const row = reopened.prepare("SELECT location_name FROM field_events WHERE id='e1'").get() as { location_name: string };
+    expect(row.location_name).toBe('昆明');
+    closeVault(reopened);
+  });
+
+  it('错误口令被探测并拒绝（不是静默损坏）', () => {
+    const paths = resolveVaultPaths(join(home, 'v2'));
+    closeVault(openVault(paths, TEST_PASSPHRASE, true));
+    expect(() => openVault(paths, 'wrong-pass-0001', false)).toThrow(VaultError);
+    try {
+      openVault(paths, 'wrong-pass-0001', false);
+    } catch (err) {
+      expect((err as VaultError).code).toBe('wrong-key');
+    }
+  });
+
+  it('口令短于 8 字符直接拒绝', () => {
+    const paths = resolveVaultPaths(join(home, 'v3'));
+    expect(() => openVault(paths, 'short', true)).toThrow(/至少 8 个字符/);
+  });
+});
+
+describe('backupVault', () => {
+  it('VACUUM INTO 产出加密备份文件，可用正确口令重开', () => {
+    const paths = resolveVaultPaths(join(home, 'v4'));
+    const db = openVault(paths, TEST_PASSPHRASE, true);
+    const outPath = join(paths.backupsDir, 'backup.db');
+    backupVault(db, outPath);
+    expect(existsSync(outPath)).toBe(true);
+    closeVault(db);
+
+    const restored = openVault({ ...paths, vaultDb: outPath }, TEST_PASSPHRASE, false);
+    expect(restored.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get()).toBeTruthy();
+    closeVault(restored);
+  });
+
+  it('目标已存在时拒绝覆盖', () => {
+    const paths = resolveVaultPaths(join(home, 'v5'));
+    const db = openVault(paths, TEST_PASSPHRASE, true);
+    const outPath = join(paths.backupsDir, 'dup.db');
+    backupVault(db, outPath);
+    expect(() => backupVault(db, outPath)).toThrow(/已存在/);
+    closeVault(db);
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- vault`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/vault.ts`:
+```ts
+import Database from 'better-sqlite3-multiple-ciphers';
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { applyMigrations } from './migrations';
+
+export interface VaultPaths {
+  vaultDb: string;
+  originalsRoot: string;
+  inboxDir: string;
+  quarantineDir: string;
+  backupsDir: string;
+}
+
+export function resolveVaultPaths(home: string): VaultPaths {
+  return {
+    vaultDb: join(home, 'vault.db'),
+    originalsRoot: join(home, 'originals'),
+    inboxDir: join(home, 'inbox'),
+    quarantineDir: join(home, 'quarantine'),
+    backupsDir: join(home, 'backups'),
+  };
+}
+
+export class VaultError extends Error {
+  constructor(readonly code: 'wrong-key' | 'io', message: string) {
+    super(message);
+  }
+}
+
+// SQLite3MultipleCiphers 的 SQLCipher v4 兼容模式：cipher/legacy 必须在 key 之前、
+// 首次真实读取之前生效（README 口径）。错误口令在首次读取时以 SQLITE_NOTADB 暴露。
+const CIPHER_PRAGMAS = ["cipher='sqlcipher'", 'legacy=4'] as const;
+
+export function openVault(paths: VaultPaths, passphrase: string, create: boolean): Database.Database {
+  if (passphrase.length < 8) throw new VaultError('io', 'vault 口令至少 8 个字符');
+  if (!create && !existsSync(paths.vaultDb)) throw new VaultError('io', `vault 不存在：${paths.vaultDb}`);
+  mkdirSync(dirname(paths.vaultDb), { recursive: true });
+
+  const db = new Database(paths.vaultDb);
+  try {
+    for (const p of CIPHER_PRAGMAS) db.pragma(p);
+    db.pragma(`key='${passphrase.replaceAll("'", "''")}'`);
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    db.prepare('SELECT COUNT(*) FROM sqlite_master').get(); // 错误口令在此暴露
+    applyMigrations(db);
+    return db;
+  } catch (err) {
+    db.close();
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/not a database|malformed|encrypted|corrupt/i.test(msg)) {
+      throw new VaultError('wrong-key', 'vault 口令错误或文件已损坏（无找回，见规格 §5）');
+    }
+    throw err;
+  }
+}
+
+export function closeVault(db: Database.Database): void {
+  db.close();
+}
+
+export function backupVault(db: Database.Database, outPath: string): void {
+  if (existsSync(outPath)) throw new VaultError('io', `备份目标已存在：${outPath}`);
+  // VACUUM INTO 沿用当前连接的口令与加密参数，产出即加密副本
+  db.exec(`VACUUM INTO '${outPath.replaceAll("'", "''")}'`);
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- vault`
+Expected: PASS（5 个测试）。若错误口令未被 `wrong-key` 正则捕获而抛出其他 SqliteError，把实际错误消息追加进正则——不允许放宽为吞掉所有错误。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/vault.ts apps/desktop/test/vault.test.ts apps/desktop/test/helpers.ts
+git commit -m "feat(desktop): VaultService with sqlcipher open/close/backup and wrong-key detection"
+```
+
+---
+
+### Task 4: 仓储层（repos.ts）
+
+**Files:**
+- Create: `apps/desktop/src/main/services/repos.ts`
+- Test: `apps/desktop/test/repos.test.ts`
+
+**Interfaces:**
+- Consumes: core 的 `FieldEvent / Encounter / Artifact / Participant / ConsentRecord / Memo / InboxItem / TimeSyncRecord` schema；`makeTestVault`（Task 3）
+- Produces（全部首个参数为 `db: Database.Database`）:
+  - `insertFieldEvent(db, e: FieldEvent): void`、`getFieldEvent(db, id): FieldEvent | null`、`listFieldEvents(db, date?: string): FieldEvent[]`
+  - `insertEncounter(db, e: Encounter): void`、`getEncounter(db, id): Encounter | null`、`listEncountersByEvent(db, eventId): Encounter[]`
+  - `type ArtifactRecord = Artifact & { originalPath: string }`
+  - `insertArtifact(db, a: Artifact, originalPath: string): void`、`getArtifact(db, id): ArtifactRecord | null`、`getArtifactBySha256(db, sha256): ArtifactRecord | null`、`listArtifacts(db): ArtifactRecord[]`、`listArtifactsByEncounter(db, encounterId): ArtifactRecord[]`、`setArtifactRefId(db, id, refId: string): void`
+  - `upsertParticipant(db, p: Participant): void`、`getParticipant(db, pseudonym): Participant | null`、`listParticipants(db): Participant[]`
+  - `setRealName(db, pseudonym, realName: string, createdAt: number): void`、`getRealName(db, pseudonym): string | null`（仅此二函数接触 participant_identity）
+  - `insertConsentRecord(db, c: ConsentRecord): void`、`getConsentRecord(db, id): ConsentRecord | null`、`listConsentsByEncounter(db, encounterId): ConsentRecord[]`、`withdrawConsent(db, id, at: number): void`
+  - `insertMemo(db, m: Memo): void`、`getMemo(db, id): Memo | null`、`confirmMemo(db, id, confirmedAt: number): Memo`、`listMemos(db): Memo[]`
+  - `insertInboxItem(db, i: InboxItem): void`、`getInboxItem(db, id): InboxItem | null`、`getInboxItemBySourcePath(db, sourcePath, status: InboxStatus): InboxItem | null`、`listInboxItems(db, status?: InboxStatus): InboxItem[]`、`updateInboxItem(db, id, patch): void`
+  - `insertTimeSyncRecord(db, r: TimeSyncRecord): void`
+  - insert 前一律 `Xxx.parse(...)`（zod 边界校验）；读后经行映射重建实体
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/repos.test.ts`:
+```ts
+import { describe, it, expect, afterAll } from 'vitest';
+import { Artifact, FieldEvent, InboxItem, Participant } from '@openfield/core';
+import { cleanupTestVault, makeTestVault } from './helpers';
+import {
+  getArtifact, getArtifactBySha256, getFieldEvent, getInboxItemBySourcePath, getParticipant,
+  getRealName, insertArtifact, insertFieldEvent, insertInboxItem, setRealName, upsertParticipant,
+} from '../src/main/services/repos';
+
+const { db, home } = makeTestVault();
+afterAll(() => cleanupTestVault(home));
+
+const event = FieldEvent.parse({ id: 'evt-1', date: '2026-09-09', cityCode: 'KMG', locationName: '昆明篆新市场', gps: { lat: 25.03, lng: 102.71 } });
+const artifact = Artifact.parse({
+  id: 'art-1', type: 'audio', sha256: 'b'.repeat(64), size: 1024, mime: 'audio/wav',
+  capturedAt: 1757376000000, deviceId: 'desktop', version: 1, refId: 'OF-20260909-KMG-001',
+});
+
+describe('repos', () => {
+  it('FieldEvent 往返（gps 拆列）', () => {
+    insertFieldEvent(db, event);
+    expect(getFieldEvent(db, 'evt-1')).toEqual(event);
+    expect(getFieldEvent(db, 'nope')).toBeNull();
+  });
+
+  it('Artifact 往返 + 按 sha256 查询 + originalPath 额外列', () => {
+    insertArtifact(db, artifact, '/tmp/originals/art-1/v1.wav');
+    const got = getArtifact(db, 'art-1');
+    expect(got).toEqual({ ...artifact, originalPath: '/tmp/originals/art-1/v1.wav' });
+    expect(getArtifactBySha256(db, 'b'.repeat(64))?.id).toBe('art-1');
+    expect(getArtifactBySha256(db, 'c'.repeat(64))).toBeNull();
+  });
+
+  it('重复 sha256 被唯一约束拒绝', () => {
+    expect(() => insertArtifact(db, { ...artifact, id: 'art-2' }, '/tmp/x')).toThrow();
+  });
+
+  it('Participant strict：类型层面拒绝 real_name 等多余字段', () => {
+    upsertParticipant(db, Participant.parse({ pseudonym: 'P01', industry: '蔬菜批发' }));
+    expect(getParticipant(db, 'P01')?.industry).toBe('蔬菜批发');
+  });
+
+  it('real_name 只存在于 participant_identity，读需显式函数', () => {
+    setRealName(db, 'P01', '张三', 1757376000000);
+    expect(getRealName(db, 'P01')).toBe('张三');
+    expect(getRealName(db, 'P404')).toBeNull();
+  });
+
+  it('InboxItem 按 sourcePath+status 查询', () => {
+    const item = InboxItem.parse({ id: 'inb-1', sourcePath: '/tmp/inbox/a.wav', detectedAt: 1757376000000, status: 'pending' });
+    insertInboxItem(db, item);
+    expect(getInboxItemBySourcePath(db, '/tmp/inbox/a.wav', 'pending')?.id).toBe('inb-1');
+    expect(getInboxItemBySourcePath(db, '/tmp/inbox/a.wav', 'ingested')).toBeNull();
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- repos`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/repos.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import {
+  Artifact, ConsentRecord, Encounter, FieldEvent, InboxItem, Memo, Participant, TimeSyncRecord,
+  type ArtifactType, type InboxStatus,
+} from '@openfield/core';
+
+type Row = Record<string, unknown>;
+
+function str(v: unknown): string {
+  return v as string;
+}
+function num(v: unknown): number {
+  return v as number;
+}
+
+function rowToEvent(r: Row): FieldEvent {
+  return FieldEvent.parse({
+    id: str(r.id),
+    date: str(r.date),
+    cityCode: str(r.city_code),
+    locationName: str(r.location_name),
+    ...(r.gps_lat !== null && r.gps_lat !== undefined ? { gps: { lat: num(r.gps_lat), lng: num(r.gps_lng) } } : {}),
+    ...(r.context_note !== null && r.context_note !== undefined ? { contextNote: str(r.context_note) } : {}),
+  });
+}
+
+function rowToEncounter(r: Row): Encounter {
+  return Encounter.parse({
+    id: str(r.id),
+    eventId: str(r.event_id),
+    participantRef: str(r.participant_ref),
+    samplingReason: str(r.sampling_reason),
+    ...(r.consent_record_id !== null && r.consent_record_id !== undefined ? { consentRecordId: str(r.consent_record_id) } : {}),
+    startedAt: num(r.started_at),
+    ...(r.note !== null && r.note !== undefined ? { note: str(r.note) } : {}),
+  });
+}
+
+export type ArtifactRecord = Artifact & { originalPath: string };
+
+function rowToArtifact(r: Row): ArtifactRecord {
+  const artifact = Artifact.parse({
+    id: str(r.id),
+    ...(r.encounter_id !== null && r.encounter_id !== undefined ? { encounterId: str(r.encounter_id) } : {}),
+    ...(r.event_id !== null && r.event_id !== undefined ? { eventId: str(r.event_id) } : {}),
+    type: str(r.type) as ArtifactType,
+    sha256: str(r.sha256),
+    size: num(r.size),
+    mime: str(r.mime),
+    capturedAt: num(r.captured_at),
+    ...(r.gps_lat !== null && r.gps_lat !== undefined ? { gps: { lat: num(r.gps_lat), lng: num(r.gps_lng) } } : {}),
+    deviceId: str(r.device_id),
+    version: num(r.version),
+    ...(r.ref_id !== null && r.ref_id !== undefined ? { refId: str(r.ref_id) } : {}),
+  });
+  return { ...artifact, originalPath: str(r.original_path) };
+}
+
+function rowToParticipant(r: Row): Participant {
+  return Participant.parse({
+    pseudonym: str(r.pseudonym),
+    ...(r.industry !== null && r.industry !== undefined ? { industry: str(r.industry) } : {}),
+    ...(r.region !== null && r.region !== undefined ? { region: str(r.region) } : {}),
+    ...(r.referral_chain !== null && r.referral_chain !== undefined ? { referralChain: JSON.parse(str(r.referral_chain)) as string[] } : {}),
+    ...(r.consent_scope !== null && r.consent_scope !== undefined ? { consentScope: JSON.parse(str(r.consent_scope)) as ('recording' | 'portrait' | 'publication')[] } : {}),
+  });
+}
+
+function rowToConsent(r: Row): ConsentRecord {
+  return ConsentRecord.parse({
+    id: str(r.id),
+    encounterId: str(r.encounter_id),
+    templateType: str(r.template_type) as 'recording' | 'portrait' | 'publication',
+    ...(r.signature_artifact_id !== null && r.signature_artifact_id !== undefined ? { signatureArtifactId: str(r.signature_artifact_id) } : {}),
+    ...(r.verbal_consent_artifact_id !== null && r.verbal_consent_artifact_id !== undefined ? { verbalConsentArtifactId: str(r.verbal_consent_artifact_id) } : {}),
+    scope: str(r.scope),
+    withdrawnAt: r.withdrawn_at === null || r.withdrawn_at === undefined ? null : num(r.withdrawn_at),
+  });
+}
+
+function rowToMemo(r: Row): Memo {
+  return Memo.parse({
+    id: str(r.id),
+    linkedArtifactIds: JSON.parse(str(r.linked_artifact_ids)) as string[],
+    type: str(r.type) as 'reflexive' | 'analytical' | 'daily' | 'quicknote',
+    content: str(r.content),
+    createdAt: num(r.created_at),
+    confirmedAt: r.confirmed_at === null || r.confirmed_at === undefined ? null : num(r.confirmed_at),
+  });
+}
+
+function rowToInboxItem(r: Row): InboxItem {
+  return InboxItem.parse({
+    id: str(r.id),
+    sourcePath: str(r.source_path),
+    detectedAt: num(r.detected_at),
+    ...(r.sha256 !== null && r.sha256 !== undefined ? { sha256: str(r.sha256) } : {}),
+    ...(r.suggested_event_id !== null && r.suggested_event_id !== undefined ? { suggestedEventId: str(r.suggested_event_id) } : {}),
+    ...(r.suggested_encounter_id !== null && r.suggested_encounter_id !== undefined ? { suggestedEncounterId: str(r.suggested_encounter_id) } : {}),
+    status: str(r.status) as InboxStatus,
+  });
+}
+
+// ---------- FieldEvent ----------
+
+export function insertFieldEvent(db: Database.Database, e: FieldEvent): void {
+  const v = FieldEvent.parse(e);
+  db.prepare(
+    'INSERT INTO field_events (id, date, city_code, location_name, gps_lat, gps_lng, context_note) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(v.id, v.date, v.cityCode, v.locationName, v.gps?.lat ?? null, v.gps?.lng ?? null, v.contextNote ?? null);
+}
+
+export function getFieldEvent(db: Database.Database, id: string): FieldEvent | null {
+  const r = db.prepare('SELECT * FROM field_events WHERE id = ?').get(id) as Row | undefined;
+  return r ? rowToEvent(r) : null;
+}
+
+export function listFieldEvents(db: Database.Database, date?: string): FieldEvent[] {
+  const rows = date
+    ? (db.prepare('SELECT * FROM field_events WHERE date = ? ORDER BY id').all(date) as Row[])
+    : (db.prepare('SELECT * FROM field_events ORDER BY id').all() as Row[]);
+  return rows.map(rowToEvent);
+}
+
+// ---------- Encounter ----------
+
+export function insertEncounter(db: Database.Database, e: Encounter): void {
+  const v = Encounter.parse(e);
+  db.prepare(
+    'INSERT INTO encounters (id, event_id, participant_ref, sampling_reason, consent_record_id, started_at, note) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(v.id, v.eventId, v.participantRef, v.samplingReason, v.consentRecordId ?? null, v.startedAt, v.note ?? null);
+}
+
+export function getEncounter(db: Database.Database, id: string): Encounter | null {
+  const r = db.prepare('SELECT * FROM encounters WHERE id = ?').get(id) as Row | undefined;
+  return r ? rowToEncounter(r) : null;
+}
+
+export function listEncountersByEvent(db: Database.Database, eventId: string): Encounter[] {
+  return (db.prepare('SELECT * FROM encounters WHERE event_id = ? ORDER BY started_at').all(eventId) as Row[]).map(rowToEncounter);
+}
+
+// ---------- Artifact ----------
+
+export function insertArtifact(db: Database.Database, a: Artifact, originalPath: string): void {
+  const v = Artifact.parse(a);
+  db.prepare(
+    'INSERT INTO artifacts (id, encounter_id, event_id, type, sha256, size, mime, captured_at, gps_lat, gps_lng, device_id, version, ref_id, original_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  ).run(
+    v.id, v.encounterId ?? null, v.eventId ?? null, v.type, v.sha256, v.size, v.mime, v.capturedAt,
+    v.gps?.lat ?? null, v.gps?.lng ?? null, v.deviceId, v.version, v.refId ?? null, originalPath,
+  );
+}
+
+export function getArtifact(db: Database.Database, id: string): ArtifactRecord | null {
+  const r = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(id) as Row | undefined;
+  return r ? rowToArtifact(r) : null;
+}
+
+export function getArtifactBySha256(db: Database.Database, sha256: string): ArtifactRecord | null {
+  const r = db.prepare('SELECT * FROM artifacts WHERE sha256 = ?').get(sha256) as Row | undefined;
+  return r ? rowToArtifact(r) : null;
+}
+
+export function listArtifacts(db: Database.Database): ArtifactRecord[] {
+  return (db.prepare('SELECT * FROM artifacts ORDER BY captured_at').all() as Row[]).map(rowToArtifact);
+}
+
+export function listArtifactsByEncounter(db: Database.Database, encounterId: string): ArtifactRecord[] {
+  return (db.prepare('SELECT * FROM artifacts WHERE encounter_id = ? ORDER BY captured_at').all(encounterId) as Row[]).map(rowToArtifact);
+}
+
+export function setArtifactRefId(db: Database.Database, id: string, refId: string): void {
+  db.prepare('UPDATE artifacts SET ref_id = ? WHERE id = ?').run(refId, id);
+}
+
+// ---------- Participant（分析层）+ participant_identity（真名，隔离） ----------
+
+export function upsertParticipant(db: Database.Database, p: Participant): void {
+  const v = Participant.parse(p);
+  db.prepare(
+    `INSERT INTO participants (pseudonym, industry, region, referral_chain, consent_scope) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(pseudonym) DO UPDATE SET industry=excluded.industry, region=excluded.region, referral_chain=excluded.referral_chain, consent_scope=excluded.consent_scope`,
+  ).run(
+    v.pseudonym, v.industry ?? null, v.region ?? null,
+    v.referralChain ? JSON.stringify(v.referralChain) : null,
+    v.consentScope ? JSON.stringify(v.consentScope) : null,
+  );
+}
+
+export function getParticipant(db: Database.Database, pseudonym: string): Participant | null {
+  const r = db.prepare('SELECT * FROM participants WHERE pseudonym = ?').get(pseudonym) as Row | undefined;
+  return r ? rowToParticipant(r) : null;
+}
+
+export function listParticipants(db: Database.Database): Participant[] {
+  return (db.prepare('SELECT * FROM participants ORDER BY pseudonym').all() as Row[]).map(rowToParticipant);
+}
+
+// 以下两函数是整个代码库里唯一允许接触 participant_identity 表的入口。
+
+export function setRealName(db: Database.Database, pseudonym: string, realName: string, createdAt: number): void {
+  db.prepare(
+    `INSERT INTO participant_identity (pseudonym, real_name, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(pseudonym) DO UPDATE SET real_name=excluded.real_name`,
+  ).run(pseudonym, realName, createdAt);
+}
+
+export function getRealName(db: Database.Database, pseudonym: string): string | null {
+  const r = db.prepare('SELECT real_name FROM participant_identity WHERE pseudonym = ?').get(pseudonym) as { real_name: string } | undefined;
+  return r ? r.real_name : null;
+}
+
+// ---------- ConsentRecord ----------
+
+export function insertConsentRecord(db: Database.Database, c: ConsentRecord): void {
+  const v = ConsentRecord.parse(c);
+  db.prepare(
+    'INSERT INTO consent_records (id, encounter_id, template_type, signature_artifact_id, verbal_consent_artifact_id, scope, withdrawn_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(v.id, v.encounterId, v.templateType, v.signatureArtifactId ?? null, v.verbalConsentArtifactId ?? null, v.scope, v.withdrawnAt ?? null);
+}
+
+export function getConsentRecord(db: Database.Database, id: string): ConsentRecord | null {
+  const r = db.prepare('SELECT * FROM consent_records WHERE id = ?').get(id) as Row | undefined;
+  return r ? rowToConsent(r) : null;
+}
+
+export function listConsentsByEncounter(db: Database.Database, encounterId: string): ConsentRecord[] {
+  return (db.prepare('SELECT * FROM consent_records WHERE encounter_id = ? ORDER BY id').all(encounterId) as Row[]).map(rowToConsent);
+}
+
+export function withdrawConsent(db: Database.Database, id: string, at: number): void {
+  db.prepare('UPDATE consent_records SET withdrawn_at = ? WHERE id = ?').run(at, id);
+}
+
+// ---------- Memo ----------
+
+export function insertMemo(db: Database.Database, m: Memo): void {
+  const v = Memo.parse(m);
+  db.prepare(
+    'INSERT INTO memos (id, linked_artifact_ids, type, content, created_at, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(v.id, JSON.stringify(v.linkedArtifactIds), v.type, v.content, v.createdAt, v.confirmedAt ?? null);
+}
+
+export function getMemo(db: Database.Database, id: string): Memo | null {
+  const r = db.prepare('SELECT * FROM memos WHERE id = ?').get(id) as Row | undefined;
+  return r ? rowToMemo(r) : null;
+}
+
+export function listMemos(db: Database.Database): Memo[] {
+  return (db.prepare('SELECT * FROM memos ORDER BY created_at').all() as Row[]).map(rowToMemo);
+}
+
+export function confirmMemo(db: Database.Database, id: string, confirmedAt: number): Memo {
+  db.prepare('UPDATE memos SET confirmed_at = ? WHERE id = ?').run(confirmedAt, id);
+  const memo = getMemo(db, id);
+  if (!memo) throw new Error(`memo 不存在：${id}`);
+  return memo;
+}
+
+// ---------- InboxItem ----------
+
+export function insertInboxItem(db: Database.Database, i: InboxItem): void {
+  const v = InboxItem.parse(i);
+  db.prepare(
+    'INSERT INTO inbox_items (id, source_path, detected_at, sha256, suggested_event_id, suggested_encounter_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(v.id, v.sourcePath, v.detectedAt, v.sha256 ?? null, v.suggestedEventId ?? null, v.suggestedEncounterId ?? null, v.status);
+}
+
+export function getInboxItem(db: Database.Database, id: string): InboxItem | null {
+  const r = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(id) as Row | undefined;
+  return r ? rowToInboxItem(r) : null;
+}
+
+export function getInboxItemBySourcePath(db: Database.Database, sourcePath: string, status: InboxStatus): InboxItem | null {
+  const r = db.prepare('SELECT * FROM inbox_items WHERE source_path = ? AND status = ?').get(sourcePath, status) as Row | undefined;
+  return r ? rowToInboxItem(r) : null;
+}
+
+export function listInboxItems(db: Database.Database, status?: InboxStatus): InboxItem[] {
+  const rows = status
+    ? (db.prepare('SELECT * FROM inbox_items WHERE status = ? ORDER BY detected_at').all(status) as Row[])
+    : (db.prepare('SELECT * FROM inbox_items ORDER BY detected_at').all() as Row[]);
+  return rows.map(rowToInboxItem);
+}
+
+export function updateInboxItem(
+  db: Database.Database,
+  id: string,
+  patch: { status?: InboxStatus; sha256?: string; suggestedEventId?: string; suggestedEncounterId?: string },
+): void {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (patch.status !== undefined) { sets.push('status = ?'); vals.push(patch.status); }
+  if (patch.sha256 !== undefined) { sets.push('sha256 = ?'); vals.push(patch.sha256); }
+  if (patch.suggestedEventId !== undefined) { sets.push('suggested_event_id = ?'); vals.push(patch.suggestedEventId); }
+  if (patch.suggestedEncounterId !== undefined) { sets.push('suggested_encounter_id = ?'); vals.push(patch.suggestedEncounterId); }
+  if (sets.length === 0) return;
+  vals.push(id);
+  db.prepare(`UPDATE inbox_items SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+}
+
+// ---------- TimeSyncRecord ----------
+
+export function insertTimeSyncRecord(db: Database.Database, r: TimeSyncRecord): void {
+  const v = TimeSyncRecord.parse(r);
+  db.prepare('INSERT INTO time_sync_records (id, checked_at, ntp_server, offset_ms) VALUES (?, ?, ?, ?)').run(v.id, v.checkedAt, v.ntpServer, v.offsetMs);
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- repos`
+Expected: PASS（6 个测试）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/repos.ts apps/desktop/test/repos.test.ts
+git commit -m "feat(desktop): entity repos with zod boundaries and isolated participant_identity"
+```
+
+---
+
+### Task 5: 证据链服务（evidence.ts）+ TIME_SYNC
+
+**Files:**
+- Create: `apps/desktop/src/main/services/evidence.ts`
+- Test: `apps/desktop/test/evidence.test.ts`
+
+**Interfaces:**
+- Consumes: core 的 `createEntry / verifyChain / EvidenceEntry / EvidenceAction / TimeSyncRecord / computePayloadHash`；`insertTimeSyncRecord`（Task 4）
+- Produces:
+  - `rowToEvidenceEntry(r: Record<string, unknown>): EvidenceEntry`（导出给 verify.ts 复用）
+  - `listEvidenceEntries(db): EvidenceEntry[]`（按 seq 升序）
+  - `getLastEntry(db): EvidenceEntry | null`
+  - `appendEntry(db, input: { ts: number; actor: string; action: EvidenceAction; payloadHash: string }): EvidenceEntry`——**必须在调用方事务内执行**，与业务写同生共死
+  - `recordTimeSync(db, input: { ntpServer: string; offsetMs: number; ts?: number }): { record: TimeSyncRecord; entry: EvidenceEntry }`（自带事务）
+  - `syncTime(db, opts?: { host?: string; offsetFn?: () => Promise<number> }): Promise<TimeSyncResult>`——默认 `offsetFn = () => Sntp.offset({ host: 'ntp.aliyun.com', timeout: 5000 })`
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/evidence.test.ts`:
+```ts
+import { describe, it, expect, afterAll } from 'vitest';
+import { verifyChain } from '@openfield/core';
+import { cleanupTestVault, makeTestVault } from './helpers';
+import { appendEntry, getLastEntry, listEvidenceEntries, recordTimeSync } from '../src/main/services/evidence';
+
+const { db, home } = makeTestVault();
+afterAll(() => cleanupTestVault(home));
+
+describe('appendEntry', () => {
+  it('从 0 开始连续追加，链校验通过', () => {
+    const e0 = appendEntry(db, { ts: 1757376000000, actor: 'desktop', action: 'CREATE_EVENT', payloadHash: 'a'.repeat(64) });
+    const e1 = appendEntry(db, { ts: 1757376000001, actor: 'desktop', action: 'INGEST_ARTIFACT', payloadHash: 'b'.repeat(64) });
+    expect(e0.seq).toBe(0);
+    expect(e0.prevHash).toBe('0'.repeat(64));
+    expect(e1.seq).toBe(1);
+    expect(e1.prevHash).toBe(e0.entryHash);
+    expect(verifyChain(listEvidenceEntries(db))).toEqual({ ok: true });
+    expect(getLastEntry(db)?.seq).toBe(1);
+  });
+
+  it('直接改库篡改 entry_hash 会被 verifyChain 检出', () => {
+    db.prepare('UPDATE evidence_log SET entry_hash = ? WHERE seq = 0').run('f'.repeat(64));
+    const result = verifyChain(listEvidenceEntries(db));
+    expect(result.ok).toBe(false);
+    // 还原，避免污染其他测试
+    db.prepare('DELETE FROM evidence_log WHERE seq = 1').run();
+    db.prepare('DELETE FROM evidence_log WHERE seq = 0').run();
+  });
+});
+
+describe('recordTimeSync', () => {
+  it('记录 TimeSyncRecord 并以 TIME_SYNC 入链', () => {
+    const before = listEvidenceEntries(db).length;
+    const { record, entry } = recordTimeSync(db, { ntpServer: 'test.pool', offsetMs: -320, ts: 1757376100000 });
+    expect(record.id).toBeTruthy();
+    expect(record.offsetMs).toBe(-320);
+    expect(entry.action).toBe('TIME_SYNC');
+    expect(listEvidenceEntries(db).length).toBe(before + 1);
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- evidence`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/evidence.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { createEntry, computePayloadHash, TimeSyncRecord, type EvidenceAction, type EvidenceEntry } from '@openfield/core';
+import { randomUUID } from 'node:crypto';
+import Sntp from '@hapi/sntp';
+import { insertTimeSyncRecord } from './repos';
+
+type Row = Record<string, unknown>;
+
+export function rowToEvidenceEntry(r: Row): EvidenceEntry {
+  return {
+    seq: r.seq as number,
+    ts: r.ts as number,
+    actor: r.actor as string,
+    action: r.action as EvidenceAction,
+    payloadHash: r.payload_hash as string,
+    prevHash: r.prev_hash as string,
+    entryHash: r.entry_hash as string,
+  };
+}
+
+export function listEvidenceEntries(db: Database.Database): EvidenceEntry[] {
+  return (db.prepare('SELECT * FROM evidence_log ORDER BY seq').all() as Row[]).map(rowToEvidenceEntry);
+}
+
+export function getLastEntry(db: Database.Database): EvidenceEntry | null {
+  const r = db.prepare('SELECT * FROM evidence_log ORDER BY seq DESC LIMIT 1').get() as Row | undefined;
+  return r ? rowToEvidenceEntry(r) : null;
+}
+
+// 必须在调用方事务内执行：链条目与业务写库要么同时生效，要么同时回滚。
+export function appendEntry(
+  db: Database.Database,
+  input: { ts: number; actor: string; action: EvidenceAction; payloadHash: string },
+): EvidenceEntry {
+  const prev = getLastEntry(db);
+  const entry = createEntry(prev, input);
+  db.prepare(
+    'INSERT INTO evidence_log (seq, ts, actor, action, payload_hash, prev_hash, entry_hash) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(entry.seq, entry.ts, entry.actor, entry.action, entry.payloadHash, entry.prevHash, entry.entryHash);
+  return entry;
+}
+
+export interface TimeSyncResult {
+  record: TimeSyncRecord;
+  entry: EvidenceEntry;
+}
+
+export function recordTimeSync(db: Database.Database, input: { ntpServer: string; offsetMs: number; ts?: number }): TimeSyncResult {
+  const record = TimeSyncRecord.parse({
+    id: `tsync-${randomUUID()}`,
+    checkedAt: input.ts ?? Date.now(),
+    ntpServer: input.ntpServer,
+    offsetMs: input.offsetMs,
+  });
+  const tx = db.transaction((): TimeSyncResult => {
+    insertTimeSyncRecord(db, record);
+    const entry = appendEntry(db, { ts: record.checkedAt, actor: 'desktop', action: 'TIME_SYNC', payloadHash: computePayloadHash(record) });
+    return { record, entry };
+  });
+  return tx();
+}
+
+export async function syncTime(
+  db: Database.Database,
+  opts: { host?: string; offsetFn?: () => Promise<number> } = {},
+): Promise<TimeSyncResult> {
+  const host = opts.host ?? 'ntp.aliyun.com';
+  const offsetFn = opts.offsetFn ?? (async () => await Sntp.offset({ host, timeout: 5000 }));
+  const offsetMs = await offsetFn();
+  return recordTimeSync(db, { ntpServer: host, offsetMs });
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- evidence`
+Expected: PASS（3 个测试）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/evidence.ts apps/desktop/test/evidence.test.ts
+git commit -m "feat(desktop): evidence chain append within caller transaction and TIME_SYNC via sntp"
+```
+
+---
+
+### Task 6: 登记服务（registry.ts）：Event/Encounter 入链 + 每日日志 + MEMO_CONFIRM
+
+**Files:**
+- Create: `apps/desktop/src/main/services/registry.ts`
+- Test: `apps/desktop/test/registry.test.ts`
+
+**Interfaces:**
+- Consumes: core 的 `FieldEvent / Encounter / Memo / computePayloadHash`；repos（Task 4）的 `insertFieldEvent / insertEncounter / insertMemo / getMemo / confirmMemo / listFieldEvents / listEncountersByEvent / listArtifacts / listArtifactsByEncounter / getArtifact`；evidence（Task 5）的 `appendEntry`
+- Produces:
+  - `createEventWithEntry(db, event: FieldEvent, opts?: { ts?: number }): { event: FieldEvent; entry: EvidenceEntry }`（事务：INSERT + `CREATE_EVENT` 入链，payloadHash = `computePayloadHash(event)`；id 已存在时抛错）
+  - `createEncounterWithEntry(db, encounter: Encounter, opts?: { ts?: number }): { encounter: Encounter; entry: EvidenceEntry }`（同上，`CREATE_ENCOUNTER`；eventId 必须已存在）
+  - `buildDailyJournal(db, date: string, opts?: { now?: number }): Memo`——按日聚合 Event/Encounter/Artifact 生成 `type: 'daily'` 的 Memo 草稿（`confirmedAt: null`，落库；同日重复调用返回已有草稿）
+  - `confirmMemoWithEntry(db, memoId: string, opts?: { confirmedAt?: number }): { memo: Memo; entry: EvidenceEntry }`（事务：confirmMemo + `MEMO_CONFIRM` 入链，payloadHash = 确认后 memo 的 `computePayloadHash`）
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/registry.test.ts`:
+```ts
+import { describe, it, expect, afterAll } from 'vitest';
+import { Encounter, FieldEvent, verifyChain } from '@openfield/core';
+import { cleanupTestVault, makeTestVault } from './helpers';
+import { listEvidenceEntries } from '../src/main/services/evidence';
+import { listMemos } from '../src/main/services/repos';
+import { buildDailyJournal, confirmMemoWithEntry, createEncounterWithEntry, createEventWithEntry } from '../src/main/services/registry';
+
+const { db, home } = makeTestVault();
+afterAll(() => cleanupTestVault(home));
+
+const event = FieldEvent.parse({ id: 'evt-1', date: '2026-09-09', cityCode: 'KMG', locationName: '昆明篆新市场' });
+
+describe('registry', () => {
+  it('createEventWithEntry：INSERT 与 CREATE_EVENT 同事务入链', () => {
+    const { entry } = createEventWithEntry(db, event, { ts: 1757376000000 });
+    expect(entry.action).toBe('CREATE_EVENT');
+    expect(entry.seq).toBe(0);
+    expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+    expect(() => createEventWithEntry(db, event)).toThrow(); // id 冲突
+  });
+
+  it('createEncounterWithEntry：要求 eventId 已存在', () => {
+    const encounter = Encounter.parse({ id: 'enc-1', eventId: 'evt-1', participantRef: 'P01', samplingReason: '雪球引荐', startedAt: 1757376100000 });
+    const { entry } = createEncounterWithEntry(db, encounter, { ts: 1757376100000 });
+    expect(entry.action).toBe('CREATE_ENCOUNTER');
+    expect(() => createEncounterWithEntry(db, Encounter.parse({ ...encounter, id: 'enc-2', eventId: 'evt-nope' }))).toThrow(/不存在/);
+  });
+
+  it('buildDailyJournal：聚合当日内容为 daily 草稿，重复调用幂等', () => {
+    const memo = buildDailyJournal(db, '2026-09-09', { now: 1757462400000 });
+    expect(memo.type).toBe('daily');
+    expect(memo.confirmedAt).toBeNull();
+    expect(memo.content).toContain('evt-1');
+    expect(memo.content).toContain('enc-1');
+    const again = buildDailyJournal(db, '2026-09-09');
+    expect(again.id).toBe(memo.id);
+  });
+
+  it('confirmMemoWithEntry：确认时间落库且 MEMO_CONFIRM 入链', () => {
+    const memo = listMemos(db).find((m) => m.type === 'daily');
+    expect(memo).toBeTruthy();
+    const { memo: confirmed, entry } = confirmMemoWithEntry(db, memo!.id, { confirmedAt: 1757462500000 });
+    expect(confirmed.confirmedAt).toBe(1757462500000);
+    expect(entry.action).toBe('MEMO_CONFIRM');
+    expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- registry`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/registry.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { computePayloadHash, Encounter, FieldEvent, type EvidenceEntry, type Memo } from '@openfield/core';
+import { appendEntry } from './evidence';
+import {
+  confirmMemo, insertEncounter, insertFieldEvent, insertMemo, listArtifacts, listArtifactsByEncounter,
+  listEncountersByEvent, listFieldEvents,
+} from './repos';
+
+export function createEventWithEntry(
+  db: Database.Database,
+  event: FieldEvent,
+  opts: { ts?: number } = {},
+): { event: FieldEvent; entry: EvidenceEntry } {
+  const v = FieldEvent.parse(event);
+  const ts = opts.ts ?? Date.now();
+  const tx = db.transaction((): { event: FieldEvent; entry: EvidenceEntry } => {
+    insertFieldEvent(db, v);
+    const entry = appendEntry(db, { ts, actor: 'desktop', action: 'CREATE_EVENT', payloadHash: computePayloadHash(v) });
+    return { event: v, entry };
+  });
+  try {
+    return tx();
+  } catch (err) {
+    if (err instanceof Error && /UNIQUE constraint/.test(err.message)) {
+      throw new Error(`FieldEvent 已存在：${v.id}`);
+    }
+    throw err;
+  }
+}
+
+export function createEncounterWithEntry(
+  db: Database.Database,
+  encounter: Encounter,
+  opts: { ts?: number } = {},
+): { encounter: Encounter; entry: EvidenceEntry } {
+  const v = Encounter.parse(encounter);
+  const ts = opts.ts ?? Date.now();
+  const tx = db.transaction((): { encounter: Encounter; entry: EvidenceEntry } => {
+    const parent = db.prepare('SELECT id FROM field_events WHERE id = ?').get(v.eventId);
+    if (!parent) throw new Error(`eventId 不存在：${v.eventId}`);
+    insertEncounter(db, v);
+    const entry = appendEntry(db, { ts, actor: 'desktop', action: 'CREATE_ENCOUNTER', payloadHash: computePayloadHash(v) });
+    return { encounter: v, entry };
+  });
+  try {
+    return tx();
+  } catch (err) {
+    if (err instanceof Error && /UNIQUE constraint/.test(err.message)) {
+      throw new Error(`Encounter 已存在：${v.id}`);
+    }
+    throw err;
+  }
+}
+
+function localTimeline(db: Database.Database, date: string): string {
+  const events = listFieldEvents(db, date);
+  const lines: string[] = [`${date} 田野日志（草稿，待人工补写反思）`];
+  for (const e of events) {
+    lines.push(`- 事件 ${e.id}：${e.cityCode} ${e.locationName}`);
+    const encounters = listEncountersByEvent(db, e.id);
+    for (const c of encounters) {
+      lines.push(`  - 访谈 ${c.id}：受访者 ${c.participantRef}（${c.samplingReason}）`);
+      for (const a of listArtifactsByEncounter(db, c.id)) {
+        lines.push(`    - 采集物 ${a.id}（${a.type}，sha256 前 8 位 ${a.sha256.slice(0, 8)}）`);
+      }
+    }
+  }
+  const total = listArtifacts(db).filter((a) => {
+    if (a.encounterId) return false; // 已随访谈列出
+    const owner = a.eventId ? listFieldEvents(db).find((e) => e.id === a.eventId) : undefined;
+    return owner?.date === date;
+  }).length;
+  lines.push(`- 未挂访谈的当日采集物：${total} 份`);
+  return lines.join('\n');
+}
+
+export function buildDailyJournal(db: Database.Database, date: string, opts: { now?: number } = {}): Memo {
+  const existing = listMemos(db).find((m) => m.type === 'daily' && m.id === `journal-${date}`);
+  if (existing) return existing;
+  const memo: Memo = {
+    id: `journal-${date}`,
+    linkedArtifactIds: [],
+    type: 'daily',
+    content: localTimeline(db, date),
+    createdAt: opts.now ?? Date.now(),
+    confirmedAt: null,
+  };
+  insertMemo(db, memo);
+  return memo;
+}
+
+export function confirmMemoWithEntry(
+  db: Database.Database,
+  memoId: string,
+  opts: { confirmedAt?: number } = {},
+): { memo: Memo; entry: EvidenceEntry } {
+  const confirmedAt = opts.confirmedAt ?? Date.now();
+  const tx = db.transaction((): { memo: Memo; entry: EvidenceEntry } => {
+    const memo = confirmMemo(db, memoId, confirmedAt);
+    const entry = appendEntry(db, { ts: confirmedAt, actor: 'desktop', action: 'MEMO_CONFIRM', payloadHash: computePayloadHash(memo) });
+    return { memo, entry };
+  });
+  return tx();
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- registry`
+Expected: PASS（4 个测试）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/registry.ts apps/desktop/test/registry.test.ts
+git commit -m "feat(desktop): event/encounter registration with chain entries and daily journal drafts"
+```
+
+---
+
+### Task 7: IngestService（ingest.ts）：哈希 → 封存 → 登记入链
+
+**Files:**
+- Create: `apps/desktop/src/main/services/ingest.ts`
+- Test: `apps/desktop/test/ingest.test.ts`
+
+**Interfaces:**
+- Consumes: core 的 `Artifact / computePayloadHash / type ArtifactType`；evidence（Task 5）的 `appendEntry`；repos（Task 4）的 `insertArtifact / getArtifactBySha256 / updateInboxItem / getInboxItem`
+- Produces:
+  - `class IngestError extends Error { code: 'empty-file' | 'hash-mismatch' | 'unknown-ext' | 'io' }`
+  - `guessArtifactType(filename: string): { type: ArtifactType; mime: string }`（扩展名映射表，未知扩展名抛 `unknown-ext`——证据类型不许猜）
+  - `interface IngestInput { sourcePath: string; mime: string; type: ArtifactType; deviceId: string; capturedAt?: number; encounterId?: string; eventId?: string; refId?: string; artifactId?: string; ts?: number }`
+  - `type IngestResult = { status: 'ingested'; artifact: Artifact } | { status: 'duplicate'; artifact: Artifact }`
+  - `ingestFile(db, originalsRoot: string, input: IngestInput): Promise<IngestResult>`
+  - `sha256File(path: string): Promise<string>`（流式哈希，导出给 verify.ts 复用）
+  - `confirmInboxItem(db, originalsRoot, itemId: string, attribution: { deviceId: string; encounterId?: string; eventId?: string }): Promise<Artifact>`
+  - `rejectInboxItem(db, itemId: string): void`
+
+流程：`stat` → 拒绝 0 字节 → 流式哈希源文件 → 按 sha256 幂等查重（命中即 `duplicate` 返回，绝不二次登记）→ `copyFile` 到 `originals/<artifactId>/.tmp-*` → 重算副本哈希（不一致 = 源文件中途被改，拒绝）→ rename 为 `v1.<ext>` → `chmod 0444` → 单事务（INSERT artifact + `INGEST_ARTIFACT` 入链，payloadHash = 文件 sha256）→ 事务失败补偿删除已封存目录。
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/ingest.test.ts`:
+```ts
+import { describe, it, expect, afterAll } from 'vitest';
+import { existsSync, mkdtempSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Encounter, FieldEvent, verifyChain } from '@openfield/core';
+import { cleanupTestVault, makeTestVault } from './helpers';
+import { listEvidenceEntries } from '../src/main/services/evidence';
+import { getArtifact, getInboxItem, insertEncounter, insertFieldEvent, insertInboxItem, listArtifacts } from '../src/main/services/repos';
+import { confirmInboxItem, guessArtifactType, ingestFile, IngestError, rejectInboxItem } from '../src/main/services/ingest';
+
+const { db, paths, home } = makeTestVault();
+const fixtures = mkdtempSync(join(tmpdir(), 'of-fix-'));
+afterAll(() => {
+  cleanupTestVault(home);
+  rmSync(fixtures, { recursive: true, force: true });
+});
+
+// 迁移 v1 对 encounters.event_id / artifacts.encounter_id 声明了外键（foreign_keys=ON），先落父行
+insertFieldEvent(db, FieldEvent.parse({ id: 'evt-1', date: '2026-09-09', cityCode: 'KMG', locationName: '昆明篆新市场' }));
+insertEncounter(db, Encounter.parse({ id: 'enc-1', eventId: 'evt-1', participantRef: 'P01', samplingReason: '雪球引荐', startedAt: 1757376100000 }));
+
+function fixture(name: string, bytes: Buffer): string {
+  const p = join(fixtures, name);
+  writeFileSync(p, bytes);
+  return p;
+}
+
+describe('guessArtifactType', () => {
+  it('识别音频/照片/文档/笔记，未知扩展名拒绝猜测', () => {
+    expect(guessArtifactType('a.wav')).toEqual({ type: 'audio', mime: 'audio/wav' });
+    expect(guessArtifactType('b.HEIC').type).toBe('photo');
+    expect(guessArtifactType('c.pdf').type).toBe('doc');
+    expect(guessArtifactType('d.txt').type).toBe('note');
+    expect(() => guessArtifactType('e.xyz')).toThrow(IngestError);
+  });
+});
+
+describe('ingestFile', () => {
+  it('完整流程：登记 + 封存只读 + 入链', async () => {
+    const src = fixture('interview.wav', Buffer.from('fake-wav-bytes-1234567890'));
+    const result = await ingestFile(db, paths.originalsRoot, {
+      sourcePath: src, mime: 'audio/wav', type: 'audio', deviceId: 'desktop', encounterId: 'enc-1', eventId: 'evt-1', ts: 1757376200000,
+    });
+    expect(result.status).toBe('ingested');
+    const art = result.artifact;
+    const stat = statSync(join(paths.originalsRoot, art.id, 'v1.wav'));
+    expect(stat.mode & 0o222).toBe(0); // 只读
+    expect(existsSync(join(paths.originalsRoot, art.id, 'v1.wav'))).toBe(true);
+    const last = listEvidenceEntries(db).at(-1);
+    expect(last?.action).toBe('INGEST_ARTIFACT');
+    expect(last?.payloadHash).toBe(art.sha256);
+    expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+  });
+
+  it('同哈希重复导入 → duplicate，不产生第二条链目与第二个目录', async () => {
+    const src = fixture('interview-copy.wav', Buffer.from('fake-wav-bytes-1234567890'));
+    const first = listArtifacts(db).length;
+    const result = await ingestFile(db, paths.originalsRoot, { sourcePath: src, mime: 'audio/wav', type: 'audio', deviceId: 'desktop' });
+    expect(result.status).toBe('duplicate');
+    expect(listArtifacts(db).length).toBe(first);
+  });
+
+  it('空文件拒绝（防 iCloud 未下载完成的占位文件当原始件）', async () => {
+    const src = fixture('empty.wav', Buffer.alloc(0));
+    await expect(ingestFile(db, paths.originalsRoot, { sourcePath: src, mime: 'audio/wav', type: 'audio', deviceId: 'desktop' })).rejects.toThrow(/空文件/);
+  });
+
+  it('登记事务失败（refId 唯一冲突）→ 已封存目录被补偿清理', async () => {
+    const first = fixture('first.wav', Buffer.from('A'.repeat(512)));
+    await ingestFile(db, paths.originalsRoot, {
+      sourcePath: first, mime: 'audio/wav', type: 'audio', deviceId: 'desktop',
+      refId: 'OF-20260909-KMG-001', artifactId: 'art-refid-1',
+    });
+    const second = fixture('refclash.wav', Buffer.from('B'.repeat(512)));
+    await expect(
+      ingestFile(db, paths.originalsRoot, {
+        sourcePath: second, mime: 'audio/wav', type: 'audio', deviceId: 'desktop',
+        refId: 'OF-20260909-KMG-001', // 与上一条冲突 → INSERT 失败 → 补偿删目录
+        artifactId: 'art-refclash',
+      }),
+    ).rejects.toThrow();
+    expect(existsSync(join(paths.originalsRoot, 'art-refclash'))).toBe(false);
+  });
+
+  it('capturedAt 未显式给出时回退为源文件 mtime', async () => {
+    const src = fixture('mtime.wav', Buffer.from('C'.repeat(256)));
+    const { artifact } = await ingestFile(db, paths.originalsRoot, { sourcePath: src, mime: 'audio/wav', type: 'audio', deviceId: 'desktop' });
+    expect(Math.abs(artifact.capturedAt - statSync(src).mtimeMs)).toBeLessThan(60_000);
+  });
+});
+
+describe('confirmInboxItem / rejectInboxItem', () => {
+  it('确认 → ingestFile → InboxItem 置 ingested 并回填 sha256', async () => {
+    const src = fixture('confirm-me.wav', Buffer.from('D'.repeat(128)));
+    insertInboxItem(db, { id: 'inb-c1', sourcePath: src, detectedAt: 1757376300000, status: 'pending' });
+    const artifact = await confirmInboxItem(db, paths.originalsRoot, 'inb-c1', { deviceId: 'desktop', encounterId: 'enc-1' });
+    expect(artifact.encounterId).toBe('enc-1');
+    expect(getInboxItem(db, 'inb-c1')?.status).toBe('ingested');
+    expect(getInboxItem(db, 'inb-c1')?.sha256).toBe(artifact.sha256);
+  });
+
+  it('拒绝 → 置 rejected，不再出现在 pending', () => {
+    insertInboxItem(db, { id: 'inb-r1', sourcePath: '/tmp/never.wav', detectedAt: 1757376300000, status: 'pending' });
+    rejectInboxItem(db, 'inb-r1');
+    expect(getInboxItem(db, 'inb-r1')?.status).toBe('rejected');
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- ingest`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/ingest.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { type Artifact, type ArtifactType } from '@openfield/core';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmod, copyFile, mkdir, rename, rm, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { basename, join } from 'node:path';
+import { appendEntry } from './evidence';
+import { getArtifactBySha256, getInboxItem, insertArtifact, updateInboxItem } from './repos';
+
+export class IngestError extends Error {
+  constructor(readonly code: 'empty-file' | 'hash-mismatch' | 'unknown-ext' | 'io', message: string) {
+    super(message);
+  }
+}
+
+const EXT_MAP: Record<string, { type: ArtifactType; mime: string }> = {
+  wav: { type: 'audio', mime: 'audio/wav' },
+  mp3: { type: 'audio', mime: 'audio/mpeg' },
+  m4a: { type: 'audio', mime: 'audio/mp4' },
+  aac: { type: 'audio', mime: 'audio/aac' },
+  jpg: { type: 'photo', mime: 'image/jpeg' },
+  jpeg: { type: 'photo', mime: 'image/jpeg' },
+  png: { type: 'photo', mime: 'image/png' },
+  heic: { type: 'photo', mime: 'image/heic' },
+  pdf: { type: 'doc', mime: 'application/pdf' },
+  docx: { type: 'doc', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+  txt: { type: 'note', mime: 'text/plain' },
+  md: { type: 'note', mime: 'text/markdown' },
+};
+
+export function guessArtifactType(filename: string): { type: ArtifactType; mime: string } {
+  const parts = filename.split('.');
+  const ext = parts.length > 1 ? (parts.pop() ?? '').toLowerCase() : '';
+  const hit = EXT_MAP[ext];
+  if (!hit) throw new IngestError('unknown-ext', `无法识别的扩展名，拒绝猜测证据类型：${filename}`);
+  return hit;
+}
+
+export async function sha256File(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
+}
+
+export interface IngestInput {
+  sourcePath: string;
+  mime: string;
+  type: ArtifactType;
+  deviceId: string;
+  capturedAt?: number;
+  encounterId?: string;
+  eventId?: string;
+  refId?: string;
+  artifactId?: string;
+  ts?: number;
+}
+
+export type IngestResult = { status: 'ingested'; artifact: Artifact } | { status: 'duplicate'; artifact: Artifact };
+
+export async function ingestFile(db: Database.Database, originalsRoot: string, input: IngestInput): Promise<IngestResult> {
+  const st = await stat(input.sourcePath);
+  if (!st.isFile()) throw new IngestError('io', `不是普通文件：${input.sourcePath}`);
+  if (st.size === 0) throw new IngestError('empty-file', `空文件拒绝登记（疑似 iCloud 未下载完成的占位文件）：${input.sourcePath}`);
+
+  const sha256 = await sha256File(input.sourcePath);
+  const existing = getArtifactBySha256(db, sha256);
+  if (existing) return { status: 'duplicate', artifact: existing };
+
+  const artifactId = input.artifactId ?? `art-${randomUUID()}`;
+  const artifactDir = join(originalsRoot, artifactId);
+  const parts = basename(input.sourcePath).split('.');
+  const ext = parts.length > 1 ? (parts.pop() ?? 'bin') : 'bin';
+  const tmpPath = join(artifactDir, `.tmp-${randomUUID()}`);
+  const finalPath = join(artifactDir, `v1.${ext}`);
+
+  await mkdir(artifactDir, { recursive: true });
+  try {
+    await copyFile(input.sourcePath, tmpPath);
+    const sealedHash = await sha256File(tmpPath);
+    if (sealedHash !== sha256) {
+      throw new IngestError('hash-mismatch', '封存过程中文件内容发生变化，拒绝登记');
+    }
+    await rename(tmpPath, finalPath);
+    await chmod(finalPath, 0o444);
+
+    const artifact: Artifact = {
+      id: artifactId,
+      ...(input.encounterId !== undefined ? { encounterId: input.encounterId } : {}),
+      ...(input.eventId !== undefined ? { eventId: input.eventId } : {}),
+      type: input.type,
+      sha256,
+      size: st.size,
+      mime: input.mime,
+      capturedAt: input.capturedAt ?? Math.floor(st.mtimeMs),
+      deviceId: input.deviceId,
+      version: 1,
+      ...(input.refId !== undefined ? { refId: input.refId } : {}),
+    };
+    const tx = db.transaction(() => {
+      insertArtifact(db, artifact, finalPath);
+      appendEntry(db, { ts: input.ts ?? Date.now(), actor: 'desktop', action: 'INGEST_ARTIFACT', payloadHash: sha256 });
+    });
+    tx();
+    return { status: 'ingested', artifact };
+  } catch (err) {
+    // 补偿：登记失败时删除已封存目录，避免孤儿（verify 也会兜底报告）
+    await rm(artifactDir, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
+}
+
+export async function confirmInboxItem(
+  db: Database.Database,
+  originalsRoot: string,
+  itemId: string,
+  attribution: { deviceId: string; encounterId?: string; eventId?: string },
+): Promise<Artifact> {
+  const item = getInboxItem(db, itemId);
+  if (!item) throw new IngestError('io', `InboxItem 不存在：${itemId}`);
+  if (item.status !== 'pending') throw new IngestError('io', `InboxItem 状态为 ${item.status}，仅 pending 可确认`);
+  const { type, mime } = guessArtifactType(item.sourcePath);
+  const result = await ingestFile(db, originalsRoot, {
+    sourcePath: item.sourcePath,
+    mime,
+    type,
+    deviceId: attribution.deviceId,
+    ...(attribution.encounterId !== undefined ? { encounterId: attribution.encounterId } : {}),
+    ...(attribution.eventId !== undefined ? { eventId: attribution.eventId } : {}),
+  });
+  updateInboxItem(db, itemId, { status: 'ingested', sha256: result.artifact.sha256 });
+  return result.artifact;
+}
+
+export function rejectInboxItem(db: Database.Database, itemId: string): void {
+  const item = getInboxItem(db, itemId);
+  if (!item) throw new IngestError('io', `InboxItem 不存在：${itemId}`);
+  updateInboxItem(db, itemId, { status: 'rejected' });
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- ingest`
+Expected: PASS（8 个测试）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/ingest.ts apps/desktop/test/ingest.test.ts
+git commit -m "feat(desktop): idempotent ingest with atomic sealing, read-only originals and chain entries"
+```
+
+---
+
+### Task 8: InboxService（inbox.ts）：scanOnce 分类 + bundle 应用 + 隔离区
+
+**Files:**
+- Create: `apps/desktop/src/main/services/inbox.ts`
+- Test: `apps/desktop/test/inbox.test.ts`
+
+**Interfaces:**
+- Consumes: core 的 `decodeBundle / BundleValidationError / type Bundle / type InboxItem`；repos（Task 4）的 `insertInboxItem / getInboxItemBySourcePath / updateInboxItem / listFieldEvents` 与各 `insertXxxIfAbsent`（本任务新增于 repos）；ingest（Task 7）的 `confirmInboxItem / IngestError`
+- Produces:
+  - `interface InboxDirs { inboxDir: string; quarantineDir: string }`
+  - `interface ScanSummary { pending: number; quarantined: number; skippedIcloud: number; skippedEmpty: number; appliedBundles: number }`
+  - `scanOnce(db, dirs: InboxDirs): Promise<ScanSummary>`——扫描 inbox 根目录（非递归）：
+    1. `^\..+\.icloud$` → iCloud 占位文件，跳过计数（等它变成本体再扫）
+    2. size 0 → macOS 14+ dataless 文件，跳过计数
+    3. 已有同 `sourcePath` 且 status=pending 的 InboxItem → 跳过（等待人工确认）
+    4. `*.ofbundle.json` → `decodeBundle` 成功 → 事务应用 bundle（实体 insertIfAbsent；mediaRefs 逐条生成 pending InboxItem，`sourcePath = bundle:<bundleId>:<filename>`，`sha256` 预填 mediaRef 值）→ bundle 文件自身记 `ingested`；失败 → 移入 `quarantine/` 并记 `quarantined`
+    5. 其余文件 → pending InboxItem（`suggestedEventId` = mtime 同日且存在的第一个 FieldEvent）
+  - `applyBundle(db, bundle: Bundle): void`（供 scanOnce 内部与测试直接调用，事务内执行）
+  - repos 新增：`insertFieldEventIfAbsent / insertEncounterIfAbsent / insertParticipantIfAbsent / insertConsentRecordIfAbsent / insertMemoIfAbsent`（均返回 `boolean`：是否新插入）
+
+- [ ] **Step 1: 在 repos.ts 追加 IfAbsent 帮助函数（TDD：先加测试再实现）**
+
+在 `apps/desktop/test/repos.test.ts` 的 `describe('repos', ...)` 内追加：
+```ts
+  it('insertXxxIfAbsent：首插返回 true，重复返回 false', () => {
+    const e = FieldEvent.parse({ id: 'evt-ifabs', date: '2026-09-10', cityCode: 'KMG', locationName: '测试' });
+    expect(insertFieldEventIfAbsent(db, e)).toBe(true);
+    expect(insertFieldEventIfAbsent(db, e)).toBe(false);
+  });
+```
+并在文件顶部导入中加入 `insertFieldEventIfAbsent`。运行 `pnpm --filter @openfield/desktop test -- repos` 确认 FAIL 后，在 `apps/desktop/src/main/services/repos.ts` 末尾追加：
+```ts
+function existsWithId(db: Database.Database, table: string, id: string): boolean {
+  return !!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id);
+}
+
+export function insertFieldEventIfAbsent(db: Database.Database, e: FieldEvent): boolean {
+  const v = FieldEvent.parse(e);
+  if (existsWithId(db, 'field_events', v.id)) return false;
+  insertFieldEvent(db, v);
+  return true;
+}
+
+export function insertEncounterIfAbsent(db: Database.Database, e: Encounter): boolean {
+  const v = Encounter.parse(e);
+  if (existsWithId(db, 'encounters', v.id)) return false;
+  insertEncounter(db, v);
+  return true;
+}
+
+export function insertParticipantIfAbsent(db: Database.Database, p: Participant): boolean {
+  const v = Participant.parse(p);
+  if (db.prepare('SELECT 1 FROM participants WHERE pseudonym = ?').get(v.pseudonym)) return false;
+  upsertParticipant(db, v);
+  return true;
+}
+
+export function insertConsentRecordIfAbsent(db: Database.Database, c: ConsentRecord): boolean {
+  const v = ConsentRecord.parse(c);
+  if (existsWithId(db, 'consent_records', v.id)) return false;
+  insertConsentRecord(db, v);
+  return true;
+}
+
+export function insertMemoIfAbsent(db: Database.Database, m: Memo): boolean {
+  const v = Memo.parse(m);
+  if (existsWithId(db, 'memos', v.id)) return false;
+  insertMemo(db, v);
+  return true;
+}
+```
+Run: `pnpm --filter @openfield/desktop test -- repos` → PASS。
+
+- [ ] **Step 2: 写 inbox 失败测试**
+
+`apps/desktop/test/inbox.test.ts`:
+```ts
+import { describe, it, expect, afterAll } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { decodeBundle, encodeBundle, type Bundle } from '@openfield/core';
+import { cleanupTestVault, makeTestVault } from './helpers';
+import { insertFieldEvent, listInboxItems } from '../src/main/services/repos';
+import { applyBundle, scanOnce } from '../src/main/services/inbox';
+
+const { db, paths, home } = makeTestVault();
+afterAll(() => cleanupTestVault(home));
+
+function writeInbox(name: string, content: string | Buffer): string {
+  const p = join(paths.inboxDir, name);
+  writeFileSync(p, content);
+  return p;
+}
+
+describe('scanOnce', () => {
+  it('普通文件 → pending 且带同日事件建议；.icloud 与 0 字节跳过', async () => {
+    insertFieldEvent(db, { id: 'evt-scan', date: '2026-09-09', cityCode: 'KMG', locationName: '昆明' });
+    const wav = writeInbox('rec.wav', Buffer.from('E'.repeat(64)));
+    writeInbox('.rec2.wav.icloud', Buffer.from('rec2.wav\u0000'));
+    writeInbox('empty.png', Buffer.alloc(0));
+
+    const summary = await scanOnce(db, { inboxDir: paths.inboxDir, quarantineDir: paths.quarantineDir });
+    expect(summary.pending).toBe(1);
+    expect(summary.skippedIcloud).toBe(1);
+    expect(summary.skippedEmpty).toBe(1);
+
+    const items = listInboxItems(db, 'pending');
+    expect(items.length).toBe(1);
+    expect(items[0]?.sourcePath).toBe(wav);
+    expect(items[0]?.suggestedEventId).toBe('evt-scan'); // mtime 同日
+  });
+
+  it('同一文件重复扫描不产生第二条 pending', async () => {
+    await scanOnce(db, { inboxDir: paths.inboxDir, quarantineDir: paths.quarantineDir });
+    const n = listInboxItems(db, 'pending').length;
+    await scanOnce(db, { inboxDir: paths.inboxDir, quarantineDir: paths.quarantineDir });
+    expect(listInboxItems(db, 'pending').length).toBe(n);
+  });
+
+  it('合法 bundle → 实体入库 + mediaRefs 变 pending + bundle 记 ingested', async () => {
+    const bundle: Bundle = {
+      schemaVersion: 1,
+      id: 'bundle-1',
+      deviceId: 'iphone-01',
+      createdAt: 1757376400000,
+      events: [{ id: 'evt-m1', date: '2026-09-09', cityCode: 'KMG', locationName: '木水花市场' }],
+      encounters: [],
+      participants: [{ pseudonym: 'P09', industry: '菌子贩' }],
+      consents: [],
+      memos: [],
+      mediaRefs: [{ filename: 'live.m4a', sha256: 'a'.repeat(64), bytes: 1024, mime: 'audio/mp4', type: 'audio', capturedAt: 1757376400000 }],
+    };
+    const p = writeInbox('session.ofbundle.json', encodeBundle(bundle));
+    const summary = await scanOnce(db, { inboxDir: paths.inboxDir, quarantineDir: paths.quarantineDir });
+    expect(summary.appliedBundles).toBe(1);
+    const items = listInboxItems(db);
+    expect(items.find((i) => i.sourcePath === p)?.status).toBe('ingested');
+    const media = items.find((i) => i.sourcePath === 'bundle:bundle-1:live.m4a');
+    expect(media?.status).toBe('pending');
+    expect(media?.sha256).toBe('a'.repeat(64));
+  });
+
+  it('畸形 bundle → 移入隔离区并记 quarantined', async () => {
+    writeInbox('broken.ofbundle.json', '{"schemaVersion": 1, "oops": true}');
+    const summary = await scanOnce(db, { inboxDir: paths.inboxDir, quarantineDir: paths.quarantineDir });
+    expect(summary.quarantined).toBe(1);
+    const items = listInboxItems(db, 'quarantined');
+    expect(items.length).toBe(1);
+    expect(items[0]?.sourcePath.startsWith(paths.quarantineDir)).toBe(true);
+  });
+});
+
+describe('applyBundle', () => {
+  it('重复应用同一 bundle 幂等（id 去重）', () => {
+    const bundle: Bundle = decodeBundle(encodeBundle({
+      schemaVersion: 1,
+      id: 'bundle-2',
+      deviceId: 'iphone-01',
+      createdAt: 1757376500000,
+      events: [{ id: 'evt-m2', date: '2026-09-10', cityCode: 'KMG', locationName: '双龙商场' }],
+      encounters: [],
+      participants: [],
+      consents: [],
+      memos: [],
+      mediaRefs: [],
+    }));
+    applyBundle(db, bundle);
+    expect(() => applyBundle(db, bundle)).not.toThrow();
+  });
+});
+```
+
+- [ ] **Step 3: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- inbox`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 4: 写实现**
+
+`apps/desktop/src/main/services/inbox.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { decodeBundle, type Bundle, type InboxStatus } from '@openfield/core';
+import { mkdir, readFile, rename, stat, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import {
+  getInboxItemBySourcePath, insertConsentRecordIfAbsent, insertEncounterIfAbsent, insertFieldEventIfAbsent,
+  insertInboxItem, insertMemoIfAbsent, insertParticipantIfAbsent, listFieldEvents,
+} from './repos';
+
+export interface InboxDirs {
+  inboxDir: string;
+  quarantineDir: string;
+}
+
+export interface ScanSummary {
+  pending: number;
+  quarantined: number;
+  skippedIcloud: number;
+  skippedEmpty: number;
+  appliedBundles: number;
+}
+
+const ICLOUD_STUB = /^\..+\.icloud$/;
+
+export function applyBundle(db: Database.Database, bundle: Bundle): void {
+  const tx = db.transaction(() => {
+    for (const e of bundle.events) insertFieldEventIfAbsent(db, e);
+    for (const p of bundle.participants) insertParticipantIfAbsent(db, p);
+    for (const c of bundle.encounters) insertEncounterIfAbsent(db, c);
+    for (const c of bundle.consents) insertConsentRecordIfAbsent(db, c);
+    for (const m of bundle.memos) insertMemoIfAbsent(db, m);
+    for (const m of bundle.mediaRefs) {
+      insertInboxItem(db, {
+        id: `inbox-${randomUUID()}`,
+        sourcePath: `bundle:${bundle.id}:${m.filename}`,
+        detectedAt: bundle.createdAt,
+        sha256: m.sha256,
+        suggestedEncounterId: m.encounterId,
+        status: 'pending' as InboxStatus,
+      });
+    }
+  });
+  tx();
+}
+
+function localDate(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function suggestEventId(db: Database.Database, mtimeMs: number): string | undefined {
+  const date = localDate(mtimeMs);
+  return listFieldEvents(db, date)[0]?.id;
+}
+
+export async function scanOnce(db: Database.Database, dirs: InboxDirs): Promise<ScanSummary> {
+  const summary: ScanSummary = { pending: 0, quarantined: 0, skippedIcloud: 0, skippedEmpty: 0, appliedBundles: 0 };
+  let names: string[];
+  try {
+    names = await readdir(dirs.inboxDir);
+  } catch {
+    return summary; // 目录不存在视为空
+  }
+
+  for (const name of names.sort()) {
+    const full = join(dirs.inboxDir, name);
+    const st = await stat(full);
+    if (!st.isFile()) continue;
+    if (ICLOUD_STUB.test(name)) {
+      summary.skippedIcloud += 1; // iCloud 未下载完的占位文件：等它变成本体
+      continue;
+    }
+    if (st.size === 0) {
+      summary.skippedEmpty += 1; // macOS 14+ dataless 文件大小为 0：不当原始件
+      continue;
+    }
+    if (getInboxItemBySourcePath(db, full, 'pending')) continue;
+
+    if (name.endsWith('.ofbundle.json')) {
+      try {
+        const bundle = decodeBundle(await readFile(full, 'utf8'));
+        applyBundle(db, bundle);
+        insertInboxItem(db, { id: `inbox-${randomUUID()}`, sourcePath: full, detectedAt: Date.now(), status: 'ingested' });
+        summary.appliedBundles += 1;
+      } catch {
+        await mkdir(dirs.quarantineDir, { recursive: true });
+        const dest = join(dirs.quarantineDir, name);
+        await rename(full, dest);
+        insertInboxItem(db, { id: `inbox-${randomUUID()}`, sourcePath: dest, detectedAt: Date.now(), status: 'quarantined' });
+        summary.quarantined += 1;
+      }
+      continue;
+    }
+
+    insertInboxItem(db, {
+      id: `inbox-${randomUUID()}`,
+      sourcePath: full,
+      detectedAt: Date.now(),
+      suggestedEventId: suggestEventId(db, st.mtimeMs),
+      status: 'pending',
+    });
+    summary.pending += 1;
+  }
+  return summary;
+}
+```
+
+- [ ] **Step 5: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- inbox && pnpm --filter @openfield/desktop test -- repos`
+Expected: PASS（inbox 5 个 + repos 7 个）。
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/desktop/src/main/services/inbox.ts apps/desktop/src/main/services/repos.ts apps/desktop/test/inbox.test.ts apps/desktop/test/repos.test.ts
+git commit -m "feat(desktop): inbox scan with icloud/empty skip, bundle apply and quarantine"
+```
+
+---
+
+### Task 9: VerifyService（verify.ts）：链重放 + 原始件重算 + 孤儿目录
+
+**Files:**
+- Create: `apps/desktop/src/main/services/verify.ts`
+- Test: `apps/desktop/test/verify.test.ts`
+
+**Interfaces:**
+- Consumes: core 的 `verifyChain`；evidence（Task 5）的 `listEvidenceEntries`；repos（Task 4）的 `listArtifacts`；ingest（Task 7）的 `ingestFile / sha256File`
+- Produces:
+  - `type VerifyIssueKind = 'hash-mismatch' | 'original-missing' | 'orphan-directory' | 'unreadable'`
+  - `interface VerifyIssue { kind: VerifyIssueKind; message: string; artifactId?: string; path?: string }`
+  - `interface VerifyReport { chainOk: boolean; chainBrokenAt: number | null; chainReason: string | null; issues: VerifyIssue[]; artifactCount: number; checkedAt: number }`
+  - `runVerify(db, originalsRoot: string): Promise<VerifyReport>`——三段检查：①`listEvidenceEntries` + `verifyChain` 重放；②逐个 artifact 重算 `sha256File(originalPath)` 比对（ENOENT → `original-missing`，其他读错误 → `unreadable`）；③`readdir(originalsRoot)` 中不对应任何 artifact id 的**目录** → `orphan-directory`
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/verify.test.ts`（每个用例独立 vault，互不污染）:
+```ts
+import { describe, it, expect } from 'vitest';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { cleanupTestVault, makeTestVault } from './helpers';
+import { ingestFile } from '../src/main/services/ingest';
+import { listArtifacts } from '../src/main/services/repos';
+import { runVerify } from '../src/main/services/verify';
+
+async function seededVault(): Promise<{ home: string; originalsRoot: string; db: ReturnType<typeof makeTestVault>['db'] }> {
+  const { db, paths, home } = makeTestVault();
+  const fixDir = mkdtempSync(join(tmpdir(), 'of-vfy-'));
+  const src = join(fixDir, 'a.wav');
+  writeFileSync(src, 'V'.repeat(256));
+  await ingestFile(db, paths.originalsRoot, { sourcePath: src, mime: 'audio/wav', type: 'audio', deviceId: 'desktop' });
+  rmSync(fixDir, { recursive: true, force: true });
+  return { home, originalsRoot: paths.originalsRoot, db };
+}
+
+describe('runVerify', () => {
+  it('干净 vault：链完整、issues 为空', async () => {
+    const { db, originalsRoot, home } = await seededVault();
+    try {
+      const report = await runVerify(db, originalsRoot);
+      expect(report.chainOk).toBe(true);
+      expect(report.chainBrokenAt).toBeNull();
+      expect(report.issues).toEqual([]);
+      expect(report.artifactCount).toBe(1);
+    } finally {
+      cleanupTestVault(home);
+    }
+  });
+
+  it('原始件被改动 → hash-mismatch 指向该 artifact', async () => {
+    const { db, originalsRoot, home } = await seededVault();
+    try {
+      const art = listArtifacts(db)[0]!;
+      chmodSync(art.originalPath, 0o644);
+      writeFileSync(art.originalPath, 'tampered-after-seal');
+      const report = await runVerify(db, originalsRoot);
+      expect(report.issues).toEqual([expect.objectContaining({ kind: 'hash-mismatch', artifactId: art.id })]);
+    } finally {
+      cleanupTestVault(home);
+    }
+  });
+
+  it('原始件文件被删 → original-missing', async () => {
+    const { db, originalsRoot, home } = await seededVault();
+    try {
+      const art = listArtifacts(db)[0]!;
+      rmSync(art.originalPath);
+      const report = await runVerify(db, originalsRoot);
+      expect(report.issues).toEqual([expect.objectContaining({ kind: 'original-missing', artifactId: art.id })]);
+    } finally {
+      cleanupTestVault(home);
+    }
+  });
+
+  it('originals 下出现未登记目录 → orphan-directory', async () => {
+    const { db, originalsRoot, home } = await seededVault();
+    try {
+      mkdirSync(join(originalsRoot, 'not-an-artifact'));
+      const report = await runVerify(db, originalsRoot);
+      expect(report.issues).toEqual([expect.objectContaining({ kind: 'orphan-directory', path: expect.stringContaining('not-an-artifact') })]);
+    } finally {
+      cleanupTestVault(home);
+    }
+  });
+
+  it('evidence_log 被篡改 → chainOk=false 且 brokenAt 定位到 seq', async () => {
+    const { db, originalsRoot, home } = await seededVault();
+    try {
+      db.prepare('UPDATE evidence_log SET payload_hash = ? WHERE seq = 0').run('f'.repeat(64));
+      const report = await runVerify(db, originalsRoot);
+      expect(report.chainOk).toBe(false);
+      expect(report.chainBrokenAt).toBe(0);
+    } finally {
+      cleanupTestVault(home);
+    }
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- verify`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/verify.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { verifyChain } from '@openfield/core';
+import { readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { listEvidenceEntries } from './evidence';
+import { listArtifacts } from './repos';
+import { sha256File } from './ingest';
+
+export type VerifyIssueKind = 'hash-mismatch' | 'original-missing' | 'orphan-directory' | 'unreadable';
+
+export interface VerifyIssue {
+  kind: VerifyIssueKind;
+  message: string;
+  artifactId?: string;
+  path?: string;
+}
+
+export interface VerifyReport {
+  chainOk: boolean;
+  chainBrokenAt: number | null;
+  chainReason: string | null;
+  issues: VerifyIssue[];
+  artifactCount: number;
+  checkedAt: number;
+}
+
+export async function runVerify(db: Database.Database, originalsRoot: string): Promise<VerifyReport> {
+  const issues: VerifyIssue[] = [];
+
+  const chain = verifyChain(listEvidenceEntries(db));
+  const chainOk = chain.ok;
+  const chainBrokenAt = chain.ok ? null : chain.brokenAt;
+  const chainReason = chain.ok ? null : chain.reason;
+
+  const artifacts = listArtifacts(db);
+  for (const a of artifacts) {
+    try {
+      const stored = await sha256File(a.originalPath);
+      if (stored !== a.sha256) {
+        issues.push({
+          kind: 'hash-mismatch',
+          message: `原始件哈希不匹配：登记 ${a.sha256.slice(0, 8)}…，实测 ${stored.slice(0, 8)}…`,
+          artifactId: a.id,
+          path: a.originalPath,
+        });
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        issues.push({ kind: 'original-missing', message: `原始件文件缺失：${a.id}`, artifactId: a.id, path: a.originalPath });
+      } else {
+        issues.push({ kind: 'unreadable', message: `原始件不可读：${a.id}（${String(err)}）`, artifactId: a.id, path: a.originalPath });
+      }
+    }
+  }
+
+  const known = new Set(artifacts.map((a) => a.id));
+  let names: string[];
+  try {
+    names = await readdir(originalsRoot);
+  } catch {
+    names = [];
+  }
+  for (const name of names) {
+    if (known.has(name)) continue;
+    const full = join(originalsRoot, name);
+    if ((await stat(full)).isDirectory()) {
+      issues.push({ kind: 'orphan-directory', message: `originals 下存在未登记目录：${name}`, path: full });
+    }
+  }
+
+  return { chainOk, chainBrokenAt, chainReason, issues, artifactCount: artifacts.length, checkedAt: Date.now() };
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- verify`
+Expected: PASS（5 个测试）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/verify.ts apps/desktop/test/verify.test.ts
+git commit -m "feat(desktop): verify service replaying chain, rehashing originals and detecting orphans"
+```
+
+---
+
+### Task 10: PurgeService（purge.ts）：PIPL 级联清除
+
+**Files:**
+- Create: `apps/desktop/src/main/services/purge.ts`
+- Test: `apps/desktop/test/purge.test.ts`
+
+**Interfaces:**
+- Consumes: core 的 `computePayloadHash`；evidence（Task 5）的 `appendEntry`；repos（Task 4）的 `listArtifactsByEncounter / listConsentsByEncounter / listMemos / setRealName / getRealName / insertParticipant / insertFieldEvent / insertEncounter / insertConsentRecord / insertMemo`；ingest（Task 7）的 `ingestFile`
+- Produces:
+  - `interface PurgeScope { pseudonym: string; encounters: number; consents: number; artifacts: number; memos: number }`
+  - `purgeSubject(db, originalsRoot: string, input: { pseudonym: string; confirmToken: string; actor: string; ts?: number }): PurgeScope`
+  - 行为（顺序即语义）：
+    1. `confirmToken !== pseudonym` → 抛错（confirm-before-acting，PRINCIPLES §3）
+    2. 收集范围：`participant_ref = pseudonym` 的 encounters → 各自的 consents 与 artifacts → `linkedArtifactIds` 命中任一 artifact 的 memos
+    3. **先删文件**（`rm -rf originals/<artifactId>`）：若后续 DB 事务失败，状态是"隐私已消失、登记残留"，verify 会以 `original-missing` 可见地报告；绝不出现"文件还在、DB 删一半"
+    4. 单事务：DELETE memos → artifacts → consent_records → encounters → participant_identity → participants，并 `appendEntry(PURGE_SUBJECT, payloadHash = computePayloadHash(scope))`
+  - **范围限制（P1 明确偏差）**：直接挂 event（无 `encounterId`）的采集物不级联——规格 §3 的清除以访谈为轴；执行者不得擅自扩大清除范围。
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/purge.test.ts`:
+```ts
+import { describe, it, expect, afterAll, beforeAll } from 'vitest';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { computePayloadHash, Encounter, FieldEvent, Participant, verifyChain } from '@openfield/core';
+import { cleanupTestVault, makeTestVault } from './helpers';
+import { ingestFile } from '../src/main/services/ingest';
+import { listEvidenceEntries } from '../src/main/services/evidence';
+import {
+  getArtifact, getEncounter, getParticipant, getRealName, insertConsentRecord, insertEncounter,
+  insertFieldEvent, insertMemo, insertParticipant, listMemos, setRealName,
+} from '../src/main/services/repos';
+import { purgeSubject } from '../src/main/services/purge';
+
+const { db, paths, home } = makeTestVault();
+const fixDir = mkdtempSync(join(tmpdir(), 'of-purge-'));
+let artifactId = '';
+
+beforeAll(async () => {
+  insertParticipant(db, Participant.parse({ pseudonym: 'P01', industry: '花卉批发' }));
+  insertParticipant(db, Participant.parse({ pseudonym: 'P02', industry: '花卉零售' }));
+  insertFieldEvent(db, FieldEvent.parse({ id: 'evt-1', date: '2026-09-09', cityCode: 'KMG', locationName: '斗南花市' }));
+  insertEncounter(db, Encounter.parse({ id: 'enc-1', eventId: 'evt-1', participantRef: 'P01', samplingReason: '关键知情人', startedAt: 1757376100000 }));
+  insertEncounter(db, Encounter.parse({ id: 'enc-2', eventId: 'evt-1', participantRef: 'P02', samplingReason: '对照样本', startedAt: 1757376200000 }));
+  insertConsentRecord(db, { id: 'con-1', encounterId: 'enc-1', templateType: 'recording', scope: '仅本研究' });
+  setRealName(db, 'P01', '张三', 1757376000000);
+  const src = join(fixDir, 'p01-interview.wav');
+  writeFileSync(src, 'P'.repeat(512));
+  const { artifact } = await ingestFile(db, paths.originalsRoot, { sourcePath: src, mime: 'audio/wav', type: 'audio', deviceId: 'desktop', encounterId: 'enc-1' });
+  artifactId = artifact.id;
+  insertMemo(db, { id: 'memo-1', linkedArtifactIds: [artifact.id], type: 'quicknote', content: '受访者提到价格波动', createdAt: 1757376300000, confirmedAt: null });
+});
+
+afterAll(() => {
+  rmSync(fixDir, { recursive: true, force: true });
+  cleanupTestVault(home);
+});
+
+describe('purgeSubject', () => {
+  it('confirmToken 不一致直接拒绝', () => {
+    expect(() => purgeSubject(db, paths.originalsRoot, { pseudonym: 'P01', confirmToken: 'p01', actor: 'desktop' })).toThrow(/完全一致/);
+    expect(getParticipant(db, 'P01')).toBeTruthy(); // 未被误删
+  });
+
+  it('正确确认 → 文件、登记行、真名全部清除，他人数据不受影响', () => {
+    const scope = purgeSubject(db, paths.originalsRoot, { pseudonym: 'P01', confirmToken: 'P01', actor: 'desktop', ts: 1757462400000 });
+    expect(scope).toEqual({ pseudonym: 'P01', encounters: 1, consents: 1, artifacts: 1, memos: 1 });
+    expect(existsSync(join(paths.originalsRoot, artifactId))).toBe(false);
+    expect(getParticipant(db, 'P01')).toBeNull();
+    expect(getRealName(db, 'P01')).toBeNull();
+    expect(getEncounter(db, 'enc-1')).toBeNull();
+    expect(getArtifact(db, artifactId)).toBeNull();
+    expect(listMemos(db).some((m) => m.id === 'memo-1')).toBe(false);
+    // 他人数据完好
+    expect(getEncounter(db, 'enc-2')).toBeTruthy();
+    expect(getParticipant(db, 'P02')).toBeTruthy();
+  });
+
+  it('PURGE_SUBJECT 入链且链完整，payloadHash 即 scope 摘要（不含真名）', () => {
+    const last = listEvidenceEntries(db).at(-1);
+    expect(last?.action).toBe('PURGE_SUBJECT');
+    expect(last?.payloadHash).toBe(computePayloadHash({ pseudonym: 'P01', encounters: 1, consents: 1, artifacts: 1, memos: 1 }));
+    expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- purge`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/purge.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { computePayloadHash } from '@openfield/core';
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { appendEntry } from './evidence';
+import { listArtifactsByEncounter, listConsentsByEncounter, listMemos } from './repos';
+
+export interface PurgeScope {
+  pseudonym: string;
+  encounters: number;
+  consents: number;
+  artifacts: number;
+  memos: number;
+}
+
+type Row = Record<string, unknown>;
+
+export function purgeSubject(
+  db: Database.Database,
+  originalsRoot: string,
+  input: { pseudonym: string; confirmToken: string; actor: string; ts?: number },
+): PurgeScope {
+  if (input.confirmToken !== input.pseudonym) {
+    throw new Error('confirmToken 必须与 pseudonym 完全一致（防误清），且清除不可撤销');
+  }
+
+  const encounters = (db.prepare('SELECT * FROM encounters WHERE participant_ref = ?').all(input.pseudonym) as Row[]).map((r) => r.id as string);
+  const consents = encounters.flatMap((encId) => listConsentsByEncounter(db, encId));
+  const artifacts = encounters.flatMap((encId) => listArtifactsByEncounter(db, encId));
+  const artifactIds = new Set(artifacts.map((a) => a.id));
+  const memos = listMemos(db).filter((m) => m.linkedArtifactIds.some((id) => artifactIds.has(id)));
+  const scope: PurgeScope = {
+    pseudonym: input.pseudonym,
+    encounters: encounters.length,
+    consents: consents.length,
+    artifacts: artifacts.length,
+    memos: memos.length,
+  };
+
+  // 先删文件再删库：若 DB 事务失败，隐私已消失、登记残留会被 verify 以 original-missing 可见报告
+  for (const a of artifacts) {
+    rmSync(join(originalsRoot, a.id), { recursive: true, force: true });
+  }
+
+  const tx = db.transaction(() => {
+    for (const m of memos) db.prepare('DELETE FROM memos WHERE id = ?').run(m.id);
+    for (const a of artifacts) db.prepare('DELETE FROM artifacts WHERE id = ?').run(a.id);
+    for (const c of consents) db.prepare('DELETE FROM consent_records WHERE id = ?').run(c.id);
+    for (const encId of encounters) db.prepare('DELETE FROM encounters WHERE id = ?').run(encId);
+    db.prepare('DELETE FROM participant_identity WHERE pseudonym = ?').run(input.pseudonym);
+    db.prepare('DELETE FROM participants WHERE pseudonym = ?').run(input.pseudonym);
+    appendEntry(db, { ts: input.ts ?? Date.now(), actor: input.actor, action: 'PURGE_SUBJECT', payloadHash: computePayloadHash(scope) });
+  });
+  tx();
+  return scope;
+}
+```
+（删除顺序受外键约束决定：memos → artifacts → consents → encounters → identity → participants；identity 必须先于 participants。）
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- purge`
+Expected: PASS（3 个测试）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/purge.ts apps/desktop/test/purge.test.ts
+git commit -m "feat(desktop): PIPL subject purge with file-first deletion and token confirmation"
+```
+
+---
+
+### Task 11: ExportService（export.ts）：引用 ID 生成 + 加密备份容器
+
+**Files:**
+- Create: `apps/desktop/src/main/services/export.ts`
+- Test: `apps/desktop/test/export.test.ts`
+
+**Interfaces:**
+- Consumes: core 的 `makeRefId / computePayloadHash`；evidence（Task 5）的 `appendEntry`；repos（Task 4）的 `getArtifact / getEncounter / getFieldEvent / setArtifactRefId`；vault（Task 3）的 `backupVault / VaultPaths`；ingest（Task 7）的 `ingestFile`
+- Produces:
+  - `class ExportError extends Error { code: 'no-encounter' | 'no-event' | 'io' }`
+  - `makeCitation(db, input: { artifactId: string; actor: string; ts?: number }): { refId: string; artifact: ArtifactRecord }`
+    - artifact 必须已挂 encounter（否则 `no-encounter`）；encounter 的 event 必须存在（否则 `no-event`）
+    - `seq = COUNT(ref_id LIKE 'OF-<yyyymmdd>-<city>-%') + 1`；`offsetSeconds = clamp(floor((capturedAt - startedAt)/1000), 0, 5999)`
+    - 事务内：`setArtifactRefId` + `appendEntry(EXPORT, payloadHash = computePayloadHash({ artifactId, refId }))`；ref_id 唯一索引冲突 → `ExportError('io', '引用 ID 冲突，请重试…')`
+  - `exportBackup(db, paths: VaultPaths, passphrase: string, outPath: string): void`——`backupVault`（VACUUM INTO，加密）到临时文件 → AdmZip 打包 `{ vault.db, originals/** }` → AES-256-GCM 加密写入 outPath
+  - `readBackup(backupPath: string, passphrase: string): Buffer`——解密并返回 zip Buffer（恢复/校验用）
+  - 备份文件格式（自研 `OFBK1` 容器）：`'OFBK1'(5B) + salt(16B) + iv(12B) + tag(16B) + AES-256-GCM 密文`，key = `scryptSync(passphrase, salt, 32)`
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/export.test.ts`:
+```ts
+import { describe, it, expect, afterAll, beforeAll } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import AdmZip from 'adm-zip';
+import { Encounter, FieldEvent, verifyChain } from '@openfield/core';
+import { cleanupTestVault, makeTestVault, TEST_PASSPHRASE } from './helpers';
+import { ingestFile } from '../src/main/services/ingest';
+import { listEvidenceEntries } from '../src/main/services/evidence';
+import { insertEncounter, insertFieldEvent } from '../src/main/services/repos';
+import { ExportError, exportBackup, makeCitation, readBackup } from '../src/main/services/export';
+
+const { db, paths, home } = makeTestVault();
+const fixDir = mkdtempSync(join(tmpdir(), 'of-exp-'));
+const T0 = 1757376100000;
+
+beforeAll(async () => {
+  insertFieldEvent(db, FieldEvent.parse({ id: 'evt-1', date: '2026-09-09', cityCode: 'KMG', locationName: '斗南花市' }));
+  insertEncounter(db, Encounter.parse({ id: 'enc-1', eventId: 'evt-1', participantRef: 'P01', samplingReason: '关键知情人', startedAt: T0 }));
+  insertEncounter(db, Encounter.parse({ id: 'enc-2', eventId: 'evt-1', participantRef: 'P02', samplingReason: '对照样本', startedAt: T0 }));
+});
+
+afterAll(() => {
+  rmSync(fixDir, { recursive: true, force: true });
+  cleanupTestVault(home);
+});
+
+async function ingestFixture(name: string, capturedAt?: number, encounterId?: string) {
+  const src = join(fixDir, name);
+  writeFileSync(src, name);
+  return ingestFile(db, paths.originalsRoot, {
+    sourcePath: src, mime: 'audio/wav', type: 'audio', deviceId: 'desktop',
+    ...(capturedAt !== undefined ? { capturedAt } : {}),
+    ...(encounterId !== undefined ? { encounterId } : {}),
+  });
+}
+
+describe('makeCitation', () => {
+  it('seq 递增 + 偏移 = capturedAt-startedAt，EXPORT 入链', async () => {
+    const r1 = await ingestFixture('a1.wav', T0 + 90_000, 'enc-1');
+    const c1 = makeCitation(db, { artifactId: r1.artifact.id, actor: 'desktop', ts: T0 + 100_000 });
+    expect(c1.refId).toBe('OF-20260909-KMG-001#T01:30');
+
+    const r2 = await ingestFixture('a2.wav', T0 + 125_000, 'enc-1');
+    const c2 = makeCitation(db, { artifactId: r2.artifact.id, actor: 'desktop' });
+    expect(c2.refId).toBe('OF-20260909-KMG-002#T02:05');
+
+    expect(listEvidenceEntries(db).at(-1)?.action).toBe('EXPORT');
+    expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+  });
+
+  it('偏移夹取到 0-5999（早于访谈起点 → T00:00，超一小时 → T99:59）', async () => {
+    const r3 = await ingestFixture('a3.wav', T0 - 5_000, 'enc-2');
+    expect(makeCitation(db, { artifactId: r3.artifact.id, actor: 'desktop' }).refId).toMatch(/#T00:00$/);
+    const r4 = await ingestFixture('a4.wav', T0 + 7_000_000, 'enc-2');
+    expect(makeCitation(db, { artifactId: r4.artifact.id, actor: 'desktop' }).refId).toMatch(/#T99:59$/);
+  });
+
+  it('未挂访谈的采集物拒绝引用', async () => {
+    const r5 = await ingestFixture('a5.wav');
+    expect(() => makeCitation(db, { artifactId: r5.artifact.id, actor: 'desktop' })).toThrow(/未挂访谈/);
+  });
+});
+
+describe('exportBackup / readBackup', () => {
+  const outPath = join(paths.backupsDir, 'daily.ofbackup');
+
+  it('加密容器可被正确口令解开，含 vault.db 与 originals', () => {
+    exportBackup(db, paths, TEST_PASSPHRASE, outPath);
+    const zip = new AdmZip(readBackup(outPath, TEST_PASSPHRASE));
+    const names = zip.getEntries().map((e) => e.entryName);
+    expect(names).toContain('vault.db');
+    expect(names.some((n) => n.startsWith('originals/'))).toBe(true);
+  });
+
+  it('错误口令解包直接失败（GCM 认证拒绝）', () => {
+    expect(() => readBackup(outPath, 'wrong-pass-999')).toThrow();
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- export`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写实现**
+
+`apps/desktop/src/main/services/export.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { computePayloadHash, makeRefId } from '@openfield/core';
+import AdmZip from 'adm-zip';
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { appendEntry } from './evidence';
+import { getArtifact, getEncounter, getFieldEvent, setArtifactRefId, type ArtifactRecord } from './repos';
+import { backupVault, type VaultPaths } from './vault';
+
+export class ExportError extends Error {
+  constructor(readonly code: 'no-encounter' | 'no-event' | 'io', message: string) {
+    super(message);
+  }
+}
+
+export function makeCitation(
+  db: Database.Database,
+  input: { artifactId: string; actor: string; ts?: number },
+): { refId: string; artifact: ArtifactRecord } {
+  const artifact = getArtifact(db, input.artifactId);
+  if (!artifact) throw new ExportError('io', `artifact 不存在：${input.artifactId}`);
+  if (!artifact.encounterId) throw new ExportError('no-encounter', '采集物未挂访谈，无法定位引用时间与城市');
+  const encounter = getEncounter(db, artifact.encounterId);
+  if (!encounter) throw new ExportError('no-encounter', `encounter 不存在：${artifact.encounterId}`);
+  const event = getFieldEvent(db, encounter.eventId);
+  if (!event) throw new ExportError('no-event', `event 不存在：${encounter.eventId}`);
+
+  const prefix = `OF-${event.date.replaceAll('-', '')}-${event.cityCode}-`;
+  const counted = db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE ref_id LIKE ?').get(`${prefix}%`) as { n: number };
+  const seq = counted.n + 1;
+  const rawOffset = Math.floor((artifact.capturedAt - encounter.startedAt) / 1000);
+  const offsetSeconds = Math.min(Math.max(rawOffset, 0), 5999);
+  const refId = makeRefId({ date: event.date, cityCode: event.cityCode, seq, offsetSeconds });
+
+  const tx = db.transaction(() => {
+    setArtifactRefId(db, artifact.id, refId);
+    appendEntry(db, {
+      ts: input.ts ?? Date.now(),
+      actor: input.actor,
+      action: 'EXPORT',
+      payloadHash: computePayloadHash({ artifactId: artifact.id, refId }),
+    });
+  });
+  try {
+    tx();
+  } catch (err) {
+    if (err instanceof Error && /UNIQUE constraint/.test(err.message)) {
+      throw new ExportError('io', `引用 ID 冲突，请重试：${refId}`);
+    }
+    throw err;
+  }
+  return { refId, artifact: { ...artifact, refId } };
+}
+
+// 自研 OFBK1 容器：'OFBK1' + salt(16) + iv(12) + GCM tag(16) + AES-256-GCM(zip(vault.db 副本 + originals/))
+const MAGIC = Buffer.from('OFBK1', 'ascii');
+
+export function exportBackup(db: Database.Database, paths: VaultPaths, passphrase: string, outPath: string): void {
+  if (existsSync(outPath)) throw new ExportError('io', `备份目标已存在：${outPath}`);
+  const tmpDb = `${outPath}.tmp-vault.db`;
+  backupVault(db, tmpDb);
+  try {
+    const zip = new AdmZip();
+    zip.addFile('vault.db', readFileSync(tmpDb));
+    zip.addLocalFolder(paths.originalsRoot, 'originals');
+
+    const salt = randomBytes(16);
+    const iv = randomBytes(12);
+    const key = scryptSync(passphrase, salt, 32);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const ciphertext = Buffer.concat([cipher.update(zip.toBuffer()), cipher.final()]);
+    writeFileSync(outPath, Buffer.concat([MAGIC, salt, iv, cipher.getAuthTag(), ciphertext]));
+  } finally {
+    rmSync(tmpDb, { force: true });
+  }
+}
+
+export function readBackup(backupPath: string, passphrase: string): Buffer {
+  const raw = readFileSync(backupPath);
+  if (!raw.subarray(0, 5).equals(MAGIC)) throw new ExportError('io', '不是 OpenField 备份文件');
+  const salt = raw.subarray(5, 21);
+  const iv = raw.subarray(21, 33);
+  const tag = raw.subarray(33, 49);
+  const decipher = createDecipheriv('aes-256-gcm', scryptSync(passphrase, salt, 32), iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(raw.subarray(49)), decipher.final()]);
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- export`
+Expected: PASS（5 个测试）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/main/services/export.ts apps/desktop/test/export.test.ts
+git commit -m "feat(desktop): citation refId generation and encrypted OFBK1 backup container"
+```
+
+---
+
+### Task 12: Electron 壳：AppState + IPC handlers + watcher + preload + 最小 renderer
+
+**Files:**
+- Modify: `apps/desktop/src/shared/ipc.ts`（追加通道名常量）
+- Create: `apps/desktop/src/main/home.ts`, `apps/desktop/src/main/state.ts`, `apps/desktop/src/main/ipc.ts`, `apps/desktop/src/main/watcher.ts`, `apps/desktop/src/main/index.ts`, `apps/desktop/src/preload/index.ts`, `apps/desktop/src/renderer/index.html`, `apps/desktop/src/renderer/src/main.ts`, `apps/desktop/src/renderer/src/global.d.ts`
+- Test: `apps/desktop/test/shell.test.ts`
+
+**Interfaces:**
+- Consumes: Task 3-11 全部服务函数；Task 1 的 `IpcResult<T>`；core 的 `FieldEvent / Encounter`
+- Produces:
+  - `src/shared/ipc.ts` 追加：`export const IPC_CHANNELS = ['vault:create','vault:open','vault:status','events:create','encounters:create','inbox:scan','inbox:list','inbox:confirm','inbox:reject','verify:run','citation:make','purge:subject','backup:export'] as const;` 与 `export type IpcChannel = (typeof IPC_CHANNELS)[number];`
+  - `home.ts`：`resolveHome(argv: string[], fallback: string): string`（识别 `--openfield-home=<path>`，缺省回退）
+  - `state.ts`：`class AppState`
+    - `constructor(home: string)`（`paths = resolveVaultPaths(home)`，`deviceId = hostname()`，`db = null`）
+    - `hasVault(): boolean`；`get unlocked(): boolean`
+    - `createVault(passphrase: string): void` / `openVault(passphrase: string): void`（调用 vault 服务后 `mkdirSync` 全部子目录；已解锁再调用则抛错）
+    - `getDb(): Database.Database`（未解锁抛错）；`close(): void`
+    - `status(): { home: string; hasVault: boolean; unlocked: boolean; events: number; encounters: number; pendingInbox: number }`
+  - `ipc.ts`：`createIpcHandlers(state: AppState): Record<IpcChannel, (payload: unknown) => Promise<IpcResult<unknown>>>`——入参用 zod 收窄，业务校验交给服务的 zod；任何异常折叠为 `{ ok: false, error: message }`
+  - `watcher.ts`：`startInboxWatcher(state: AppState, onSummary: (s: ScanSummary) => void): () => void`——chokidar `depth: 0` + `awaitWriteFinish`，事件防抖 300ms 后 `scanOnce`；返回停止函数
+  - `preload/index.ts`：`window.openfield = { invoke(channel, payload), onInboxChanged(cb) }`（invoke 白名单校验 IPC_CHANNELS）
+  - `index.ts`：装配（见 Step 5），`ipcMain.handle` 逐通道转发给 handlers；watcher 汇总推送 `inbox:changed`
+
+- [ ] **Step 1: 写失败测试**
+
+`apps/desktop/test/shell.test.ts`:
+```ts
+import { describe, it, expect, afterAll, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { cleanupTestVault } from './helpers';
+import { listInboxItems } from '../src/main/services/repos';
+import { VaultError } from '../src/main/services/vault';
+import { AppState } from '../src/main/state';
+import { createIpcHandlers } from '../src/main/ipc';
+import { startInboxWatcher } from '../src/main/watcher';
+import { resolveHome } from '../src/main/home';
+
+const home = mkdtempSync(join(tmpdir(), 'of-shell-'));
+afterAll(() => cleanupTestVault(home));
+
+describe('resolveHome', () => {
+  it('解析 --openfield-home= 参数，缺省回退', () => {
+    expect(resolveHome(['electron', '.', '--openfield-home=/tmp/ofx'], 'fallback')).toBe('/tmp/ofx');
+    expect(resolveHome(['electron', '.'], 'fallback')).toBe('fallback');
+    expect(resolveHome(['--openfield-home='], 'fallback')).toBe('fallback');
+  });
+});
+
+describe('AppState', () => {
+  it('create → status unlocked → close → reopen，错口令抛 VaultError', () => {
+    const state = new AppState(join(home, 's1'));
+    expect(state.status().unlocked).toBe(false);
+    state.createVault('passphrase-1234');
+    expect(state.status()).toMatchObject({ hasVault: true, unlocked: true });
+    state.close();
+    expect(state.status().unlocked).toBe(false);
+
+    state.openVault('passphrase-1234');
+    expect(state.unlocked).toBe(true);
+    state.close();
+
+    expect(() => new AppState(join(home, 's1')).openVault('wrong-pass-999')).toThrow(VaultError);
+  });
+
+  it('未解锁时 getDb 抛错', () => {
+    const state = new AppState(join(home, 's2'));
+    expect(() => state.getDb()).toThrow(/未解锁/);
+  });
+});
+
+describe('createIpcHandlers 端到端（main 进程同款调用序列）', () => {
+  it('建库 → 登记 → 扫描 → 确认 → 校验 → 引用 全链 ok:true', async () => {
+    const state = new AppState(join(home, 's3'));
+    const h = createIpcHandlers(state);
+
+    const created = await h['vault:create']({ passphrase: 'passphrase-1234' });
+    expect(created).toMatchObject({ ok: true });
+
+    expect(await h['events:create']({ id: 'evt-1', date: '2026-09-11', cityCode: 'KMG', locationName: '篆新市场' })).toMatchObject({ ok: true });
+    expect(await h['encounters:create']({ id: 'enc-1', eventId: 'evt-1', participantRef: 'P01', samplingReason: '目的性抽样', startedAt: Date.now() })).toMatchObject({ ok: true });
+
+    writeFileSync(join(state.paths.inboxDir, 'rec.wav'), Buffer.from('S'.repeat(128)));
+    const scan = await h['inbox:scan'](undefined);
+    expect(scan).toMatchObject({ ok: true });
+
+    const pending = (await h['inbox:list']({ status: 'pending' })) as { ok: true; data: { id: string }[] };
+    expect(pending.data).toHaveLength(1);
+    const confirmed = await h['inbox:confirm']({ itemId: pending.data[0]!.id, encounterId: 'enc-1' });
+    expect(confirmed).toMatchObject({ ok: true });
+
+    const verify = (await h['verify:run'](undefined)) as { ok: true; data: { chainOk: boolean; issues: unknown[] } };
+    expect(verify.data.chainOk).toBe(true);
+    expect(verify.data.issues).toEqual([]);
+
+    const artifactId = (confirmed as { ok: true; data: { id: string } }).data.id;
+    const cite = await h['citation:make']({ artifactId });
+    expect(cite.ok).toBe(true);
+
+    state.close();
+  });
+
+  it('非法入参 → ok:false + 错误信息（不抛穿 IPC 边界）', async () => {
+    const state = new AppState(join(home, 's4'));
+    const h = createIpcHandlers(state);
+    const bad = await h['events:create']({ oops: true });
+    expect(bad).toEqual({ ok: false, error: expect.stringMatching(/.+/) });
+    state.close();
+  });
+});
+
+describe('startInboxWatcher', () => {
+  it('inbox 落入新文件 → 防抖后自动 scanOnce', async () => {
+    const state = new AppState(join(home, 's5'));
+    state.createVault('passphrase-1234');
+    const summaries: unknown[] = [];
+    const stop = startInboxWatcher(state, (s) => summaries.push(s));
+    try {
+      writeFileSync(join(state.paths.inboxDir, 'watched.wav'), Buffer.from('W'.repeat(64)));
+      await vi.waitFor(() => expect(listInboxItems(state.getDb(), 'pending')).toHaveLength(1), { timeout: 5_000, interval: 100 });
+    } finally {
+      stop();
+      state.close();
+    }
+  });
+});
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `pnpm --filter @openfield/desktop test -- shell`
+Expected: FAIL（模块不存在）。
+
+- [ ] **Step 3: 写 state/ipc/watcher/home 实现**
+
+`apps/desktop/src/main/home.ts`:
+```ts
+export function resolveHome(argv: string[], fallback: string): string {
+  const arg = argv.find((a) => a.startsWith('--openfield-home='));
+  if (!arg) return fallback;
+  const value = arg.slice('--openfield-home='.length);
+  return value.length > 0 ? value : fallback;
+}
+```
+
+`apps/desktop/src/shared/ipc.ts` 整体替换为：
+```ts
+export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+export const IPC_CHANNELS = [
+  'vault:create',
+  'vault:open',
+  'vault:status',
+  'events:create',
+  'encounters:create',
+  'inbox:scan',
+  'inbox:list',
+  'inbox:confirm',
+  'inbox:reject',
+  'verify:run',
+  'citation:make',
+  'purge:subject',
+  'backup:export',
+] as const;
+
+export type IpcChannel = (typeof IPC_CHANNELS)[number];
+```
+
+`apps/desktop/src/main/state.ts`:
+```ts
+import type Database from 'better-sqlite3-multiple-ciphers';
+import { existsSync, mkdirSync } from 'node:fs';
+import { hostname } from 'node:os';
+import { openVault, resolveVaultPaths } from './services/vault';
+
+export interface VaultStatus {
+  home: string;
+  hasVault: boolean;
+  unlocked: boolean;
+  events: number;
+  encounters: number;
+  pendingInbox: number;
+}
+
+export class AppState {
+  readonly paths: ReturnType<typeof resolveVaultPaths>;
+  readonly deviceId = hostname();
+  private db: Database.Database | null = null;
+
+  constructor(readonly home: string) {
+    this.paths = resolveVaultPaths(home);
+  }
+
+  hasVault(): boolean {
+    return existsSync(this.paths.vaultDb);
+  }
+
+  get unlocked(): boolean {
+    return this.db !== null;
+  }
+
+  createVault(passphrase: string): void {
+    if (this.db) throw new Error('vault 已解锁');
+    this.db = openVault(this.paths, passphrase, true);
+    this.ensureDirs();
+  }
+
+  openVault(passphrase: string): void {
+    if (this.db) throw new Error('vault 已解锁');
+    this.db = openVault(this.paths, passphrase, false);
+    this.ensureDirs();
+  }
+
+  private ensureDirs(): void {
+    for (const dir of [this.paths.originalsRoot, this.paths.inboxDir, this.paths.quarantineDir, this.paths.backupsDir]) {
+      mkdirSync(dir, { recursive: true });
+    }
+  }
+
+  getDb(): Database.Database {
+    if (!this.db) throw new Error('vault 未解锁');
+    return this.db;
+  }
+
+  close(): void {
+    this.db?.close();
+    this.db = null;
+  }
+
+  status(): VaultStatus {
+    const db = this.db;
+    if (!db) return { home: this.home, hasVault: this.hasVault(), unlocked: false, events: 0, encounters: 0, pendingInbox: 0 };
+    const count = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
+    return {
+      home: this.home,
+      hasVault: true,
+      unlocked: true,
+      events: count('SELECT COUNT(*) AS n FROM field_events'),
+      encounters: count('SELECT COUNT(*) AS n FROM encounters'),
+      pendingInbox: count("SELECT COUNT(*) AS n FROM inbox_items WHERE status = 'pending'"),
+    };
+  }
+}
+```
+
+`apps/desktop/src/main/ipc.ts`:
+```ts
+import { z } from 'zod';
+import { Encounter, FieldEvent, type InboxStatus } from '@openfield/core';
+import { join } from 'node:path';
+import type { IpcChannel, IpcResult } from '../shared/ipc';
+import type { AppState } from './state';
+import { createEventWithEntry, createEncounterWithEntry } from './services/registry';
+import { confirmInboxItem, rejectInboxItem } from './services/ingest';
+import { scanOnce } from './services/inbox';
+import { listInboxItems } from './services/repos';
+import { runVerify } from './services/verify';
+import { purgeSubject } from './services/purge';
+import { exportBackup, makeCitation } from './services/export';
+
+const PassphraseInput = z.object({ passphrase: z.string() });
+const ConfirmInput = z.object({
+  itemId: z.string().min(1),
+  encounterId: z.string().min(1).optional(),
+  eventId: z.string().min(1).optional(),
+});
+const PurgeInput = z.object({ pseudonym: z.string().min(1), confirmToken: z.string() });
+const BackupInput = z.object({ passphrase: z.string().min(8) });
+const ListInput = z.object({ status: z.string().optional() });
+const ItemInput = z.object({ itemId: z.string().min(1) });
+const CitationInput = z.object({ artifactId: z.string().min(1) });
+
+export function createIpcHandlers(
+  state: AppState,
+): Record<IpcChannel, (payload: unknown) => Promise<IpcResult<unknown>>> {
+  async function wrap(fn: () => unknown): Promise<IpcResult<unknown>> {
+    try {
+      return { ok: true, data: await fn() };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  return {
+    'vault:create': (p) =>
+      wrap(() => {
+        state.createVault(PassphraseInput.parse(p).passphrase);
+        return state.status();
+      }),
+    'vault:open': (p) =>
+      wrap(() => {
+        state.openVault(PassphraseInput.parse(p).passphrase);
+        return state.status();
+      }),
+    'vault:status': () => wrap(() => state.status()),
+    'events:create': (p) => wrap(() => createEventWithEntry(state.getDb(), FieldEvent.parse(p))),
+    'encounters:create': (p) => wrap(() => createEncounterWithEntry(state.getDb(), Encounter.parse(p))),
+    'inbox:scan': () =>
+      wrap(() => scanOnce(state.getDb(), { inboxDir: state.paths.inboxDir, quarantineDir: state.paths.quarantineDir })),
+    'inbox:list': (p) =>
+      wrap(() => listInboxItems(state.getDb(), ListInput.parse(p).status as InboxStatus | undefined)),
+    'inbox:confirm': (p) =>
+      wrap(async () => {
+        const input = ConfirmInput.parse(p);
+        return confirmInboxItem(state.getDb(), state.paths.originalsRoot, input.itemId, {
+          deviceId: state.deviceId,
+          ...(input.encounterId !== undefined ? { encounterId: input.encounterId } : {}),
+          ...(input.eventId !== undefined ? { eventId: input.eventId } : {}),
+        });
+      }),
+    'inbox:reject': (p) => wrap(() => rejectInboxItem(state.getDb(), ItemInput.parse(p).itemId)),
+    'verify:run': () => wrap(() => runVerify(state.getDb(), state.paths.originalsRoot)),
+    'citation:make': (p) =>
+      wrap(() => makeCitation(state.getDb(), { artifactId: CitationInput.parse(p).artifactId, actor: state.deviceId })),
+    'purge:subject': (p) =>
+      wrap(() => {
+        const input = PurgeInput.parse(p);
+        return purgeSubject(state.getDb(), state.paths.originalsRoot, {
+          pseudonym: input.pseudonym,
+          confirmToken: input.confirmToken,
+          actor: state.deviceId,
+        });
+      }),
+    'backup:export': (p) =>
+      wrap(() => {
+        const { passphrase } = BackupInput.parse(p);
+        const stamp = new Date().toISOString().replaceAll(':', '-');
+        const outPath = join(state.paths.backupsDir, `backup-${stamp}.ofbackup`);
+        exportBackup(state.getDb(), state.paths, passphrase, outPath);
+        return { outPath };
+      }),
+  };
+}
+```
+
+`apps/desktop/src/main/watcher.ts`:
+```ts
+import { watch } from 'chokidar';
+import type { AppState } from './state';
+import { scanOnce, type ScanSummary } from './services/inbox';
+
+export function startInboxWatcher(state: AppState, onSummary: (s: ScanSummary) => void): () => void {
+  let timer: NodeJS.Timeout | null = null;
+  const schedule = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (!state.unlocked) return;
+      scanOnce(state.getDb(), { inboxDir: state.paths.inboxDir, quarantineDir: state.paths.quarantineDir })
+        .then((s) => {
+          if (s.pending + s.quarantined + s.appliedBundles > 0) onSummary(s);
+        })
+        .catch(() => {}); // 文件事件会集中爆发，单次失败交给下次触发；scanOnce 对目录缺失返回空
+    }, 300);
+  };
+
+  const watcher = watch(state.paths.inboxDir, {
+    depth: 0,
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
+  });
+  watcher.on('add', schedule).on('change', schedule).on('unlink', schedule);
+
+  return () => {
+    if (timer) clearTimeout(timer);
+    void watcher.close();
+  };
+}
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --filter @openfield/desktop test -- shell`
+Expected: PASS（6 个测试）。
+
+- [ ] **Step 5: 写薄壳（入口 / preload / renderer，E2E 覆盖）**
+
+`apps/desktop/src/main/index.ts`:
+```ts
+import { app, BrowserWindow, ipcMain } from 'electron';
+import { join } from 'node:path';
+import { resolveHome } from './home';
+import { AppState } from './state';
+import { createIpcHandlers } from './ipc';
+import { startInboxWatcher } from './watcher';
+import { IPC_CHANNELS } from '../shared/ipc';
+
+const state = new AppState(resolveHome(process.argv, join(app.getPath('userData'), 'openfield')));
+let stopWatcher: (() => void) | null = null;
+
+function createWindow(): BrowserWindow {
+  const win = new BrowserWindow({
+    width: 980,
+    height: 760,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void win.loadURL(process.env.ELECTRON_RENDERER_URL);
+  } else {
+    void win.loadFile(join(__dirname, '../renderer/index.html'));
+  }
+  return win;
+}
+
+void app.whenReady().then(() => {
+  const handlers = createIpcHandlers(state);
+  for (const channel of IPC_CHANNELS) {
+    ipcMain.handle(channel, (_event, payload: unknown) => handlers[channel](payload));
+  }
+  const win = createWindow();
+  stopWatcher = startInboxWatcher(state, (s) => win.webContents.send('inbox:changed', s));
+});
+
+app.on('window-all-closed', () => {
+  stopWatcher?.();
+  state.close();
+  app.quit();
+});
+```
+
+`apps/desktop/src/preload/index.ts`:
+```ts
+import { contextBridge, ipcRenderer } from 'electron';
+import { IPC_CHANNELS, type IpcResult } from '../shared/ipc';
+
+contextBridge.exposeInMainWorld('openfield', {
+  invoke: (channel: string, payload?: unknown): Promise<IpcResult<unknown>> => {
+    if (!(IPC_CHANNELS as readonly string[]).includes(channel)) {
+      return Promise.resolve({ ok: false, error: `未知 IPC 通道：${channel}` });
+    }
+    return ipcRenderer.invoke(channel, payload);
+  },
+  onInboxChanged: (cb: (summary: unknown) => void): void => {
+    ipcRenderer.on('inbox:changed', (_event, summary) => cb(summary));
+  },
+});
+```
+
+`apps/desktop/src/renderer/index.html`:
+```html
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
+    <title>OpenField</title>
+  </head>
+  <body>
+    <h1>OpenField P1 控制台</h1>
+    <section>
+      <h2>Vault</h2>
+      <input id="pass" type="password" placeholder="口令（≥8 字符）" />
+      <button id="btn-create">创建 vault</button>
+      <button id="btn-open">解锁</button>
+      <button id="btn-status">状态</button>
+      <pre id="status">locked</pre>
+    </section>
+    <section>
+      <h2>登记</h2>
+      <input id="ev-id" placeholder="事件 ID（evt-1）" />
+      <input id="ev-date" placeholder="日期 2026-09-11" />
+      <input id="ev-city" placeholder="城市码 KMG" />
+      <input id="ev-loc" placeholder="地点名称" />
+      <button id="btn-event">创建事件</button>
+      <br />
+      <input id="enc-id" placeholder="访谈 ID（enc-1）" />
+      <input id="enc-event" placeholder="所属事件 ID（evt-1）" />
+      <input id="enc-participant" placeholder="受访者笔名（P01）" />
+      <input id="enc-reason" placeholder="抽样理由" />
+      <button id="btn-encounter">创建访谈</button>
+    </section>
+    <section>
+      <h2>Inbox</h2>
+      <button id="btn-scan">扫描</button>
+      <pre id="scan"></pre>
+      <input id="confirm-enc" placeholder="归入访谈 ID（enc-1）" />
+      <ul id="pending"></ul>
+    </section>
+    <section>
+      <h2>校验与引用</h2>
+      <button id="btn-verify">运行校验</button>
+      <pre id="report"></pre>
+      <input id="cite-art" placeholder="采集物 ID" />
+      <button id="btn-cite">生成引用</button>
+      <pre id="cite-out"></pre>
+    </section>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
+```
+
+`apps/desktop/src/renderer/src/global.d.ts`:
+```ts
+export {};
+
+declare global {
+  interface Window {
+    openfield: {
+      invoke(channel: string, payload?: unknown): Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
+      onInboxChanged(cb: (summary: unknown) => void): void;
+    };
+  }
+}
+```
+
+`apps/desktop/src/renderer/src/main.ts`:
+```ts
+import type { IpcResult } from '../../shared/ipc';
+
+const $ = (id: string): HTMLElement => {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`缺元素 #${id}`);
+  return el;
+};
+
+async function invoke<T>(channel: string, payload?: unknown): Promise<T> {
+  const res = (await window.openfield.invoke(channel, payload)) as IpcResult<T>;
+  if (!res.ok) throw new Error(res.error);
+  return res.data;
+}
+
+interface PendingItem {
+  id: string;
+  sourcePath: string;
+  status: string;
+}
+
+async function refreshPending(): Promise<void> {
+  const items = await invoke<PendingItem[]>('inbox:list', {});
+  const ul = $('pending');
+  ul.textContent = '';
+  for (const item of items.filter((i) => i.status === 'pending')) {
+    const li = document.createElement('li');
+    li.textContent = `${item.id} ${item.sourcePath}`;
+    const btn = document.createElement('button');
+    btn.textContent = '确认入库';
+    btn.dataset.itemId = item.id;
+    btn.addEventListener('click', async () => {
+      const artifact = await invoke<{ id: string }>('inbox:confirm', {
+        itemId: item.id,
+        encounterId: ($('confirm-enc') as HTMLInputElement).value || undefined,
+      });
+      ($('cite-art') as HTMLInputElement).value = artifact.id;
+      await refreshPending();
+    });
+    li.appendChild(btn);
+    ul.appendChild(li);
+  }
+}
+
+const statusEl = $('status') as HTMLPreElement;
+const scanEl = $('scan') as HTMLPreElement;
+const reportEl = $('report') as HTMLPreElement;
+const citeOutEl = $('cite-out') as HTMLPreElement;
+
+$('btn-create').addEventListener('click', async () => {
+  statusEl.textContent = JSON.stringify(
+    await invoke('vault:create', { passphrase: ($('pass') as HTMLInputElement).value }),
+  );
+});
+$('btn-open').addEventListener('click', async () => {
+  statusEl.textContent = JSON.stringify(
+    await invoke('vault:open', { passphrase: ($('pass') as HTMLInputElement).value }),
+  );
+});
+$('btn-status').addEventListener('click', async () => {
+  statusEl.textContent = JSON.stringify(await invoke('vault:status'));
+});
+$('btn-event').addEventListener('click', async () => {
+  await invoke('events:create', {
+    id: ($('ev-id') as HTMLInputElement).value,
+    date: ($('ev-date') as HTMLInputElement).value,
+    cityCode: ($('ev-city') as HTMLInputElement).value,
+    locationName: ($('ev-loc') as HTMLInputElement).value,
+  });
+  statusEl.textContent = '事件已登记';
+});
+$('btn-encounter').addEventListener('click', async () => {
+  await invoke('encounters:create', {
+    id: ($('enc-id') as HTMLInputElement).value,
+    eventId: ($('enc-event') as HTMLInputElement).value,
+    participantRef: ($('enc-participant') as HTMLInputElement).value,
+    samplingReason: ($('enc-reason') as HTMLInputElement).value,
+    startedAt: Date.now(),
+  });
+  statusEl.textContent = '访谈已登记';
+});
+$('btn-scan').addEventListener('click', async () => {
+  scanEl.textContent = JSON.stringify(await invoke('inbox:scan'));
+  await refreshPending();
+});
+$('btn-verify').addEventListener('click', async () => {
+  reportEl.textContent = JSON.stringify(await invoke('verify:run'), null, 2);
+});
+$('btn-cite').addEventListener('click', async () => {
+  const out = await invoke<{ refId: string }>('citation:make', {
+    artifactId: ($('cite-art') as HTMLInputElement).value,
+  });
+  citeOutEl.textContent = out.refId;
+});
+window.openfield.onInboxChanged(() => void refreshPending());
+```
+
+- [ ] **Step 6: typecheck + 构建验证**
+
+Run: `pnpm --filter @openfield/desktop typecheck && pnpm --filter @openfield/desktop build`
+Expected: 无错误；`out/main/index.js`、`out/preload/index.js`、`out/renderer/index.html` 产出。
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/desktop/src apps/desktop/test/shell.test.ts
+git commit -m "feat(desktop): electron shell with typed ipc handlers, inbox watcher and minimal console"
+```
+
+---
+
+### Task 13: E2E 冒烟（Playwright _electron）+ 全量回归
+
+**Files:**
+- Create: `apps/desktop/playwright.config.ts`, `apps/desktop/e2e/smoke.e2e.ts`
+
+**Interfaces:**
+- Consumes: Task 12 构建出的 `out/main/index.js`（`--openfield-home=` 指向临时 home）；`@playwright/test` 的 `_electron.launch`
+- Produces: 可重复执行的 Electron 冒烟链路（临时 home，退出即清理）
+
+- [ ] **Step 1: 写 Playwright 配置与 E2E**
+
+`apps/desktop/playwright.config.ts`:
+```ts
+import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  testDir: 'e2e',
+  timeout: 120_000,
+  forbidOnly: !!process.env.CI,
+});
+```
+
+`apps/desktop/e2e/smoke.e2e.ts`:
+```ts
+import { expect, test, _electron } from '@playwright/test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+// electron 包在 Node 环境下 default export 即可执行文件路径；类型层面按 string 用
+import electronPath from 'electron';
+
+test('P1 冒烟：建库 → 登记 → 扫描 → 确认 → 校验 → 引用', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'of-e2e-'));
+  const electronApp = await _electron.launch({
+    args: [join(__dirname, '../out/main/index.js'), `--openfield-home=${home}`],
+    executablePath: electronPath as unknown as string,
+  });
+  const win = await electronApp.firstWindow();
+
+  try {
+    await win.fill('#pass', 'e2e-passphrase-1');
+    await win.click('#btn-create');
+    await expect(win.locator('#status')).toContainText('"unlocked":true');
+
+    await win.fill('#ev-id', 'evt-1');
+    await win.fill('#ev-date', '2026-09-11');
+    await win.fill('#ev-city', 'KMG');
+    await win.fill('#ev-loc', '昆明篆新市场');
+    await win.click('#btn-event');
+
+    await win.fill('#enc-id', 'enc-1');
+    await win.fill('#enc-event', 'evt-1');
+    await win.fill('#enc-participant', 'P01');
+    await win.fill('#enc-reason', '目的性抽样');
+    await win.click('#btn-encounter');
+
+    mkdirSync(join(home, 'inbox'), { recursive: true });
+    writeFileSync(join(home, 'inbox', 'interview.wav'), Buffer.from('e2e-fixture-bytes-000000'));
+
+    await win.click('#btn-scan');
+    await expect(win.locator('#scan')).toContainText('"pending":1');
+    await win.fill('#confirm-enc', 'enc-1');
+    await win.click('#pending button');
+    await expect(win.locator('#pending')).not.toContainText('interview.wav');
+
+    await win.click('#btn-verify');
+    await expect(win.locator('#report')).toContainText('"chainOk":true');
+    await expect(win.locator('#report')).toContainText('"issues":[]');
+
+    await expect(win.locator('#cite-art')).not.toHaveValue('');
+    await win.click('#btn-cite');
+    await expect(win.locator('#cite-out')).toHaveText(/^OF-\d{8}-KMG-\d{3}#T\d{2}:\d{2}$/);
+  } finally {
+    await electronApp.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+```
+
+- [ ] **Step 2: 构建 + 运行 E2E**
+
+Run: `pnpm --filter @openfield/desktop e2e`
+Expected: `1 passed`。若 Electron 启动报 preload 沙箱错误，检查 preload 是否只 import `electron` 与 `../shared/ipc`（不得引入 Node 模块）；若窗口文本断言超时，用 `npx playwright test --headed` 肉眼核对渲染层是否报错（CSP、模块路径）。
+
+- [ ] **Step 3: 全量回归**
+
+Run: `pnpm typecheck && pnpm test`
+Expected: core + desktop 全部 typecheck 通过；全部 vitest 通过（Task 1-12 累计约 45+ 用例）。
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/desktop/playwright.config.ts apps/desktop/e2e
+git commit -m "test(desktop): playwright electron smoke covering vault-to-citation flow"
+```
+
+---
+
+## 计划自检记录
+
+**规格覆盖（对照 `2026-09-09-openfield-p1-architecture-design.md`）**
+- §1 五服务：VaultService → Task 3；IngestService → Task 7；InboxWatcher → Task 8 + Task 12（chokidar 触发 scanOnce）；VerifyService → Task 9；ExportService → Task 11。
+- §2.3 原始件封存（temp + rename + chmod 0444 + 幂等）：Task 7。
+- §2.4 TIME_SYNC：Task 5（`@hapi/sntp`，默认 `ntp.aliyun.com`）。
+- §3 数据模型落库 + identity 隔离 + PIPL 清除：Task 2（11 张表）、Task 4（`setRealName/getRealName` 是唯一入口）、Task 10。
+- §4 导入流：三类来源 → 手机 bundle（Task 8 的 `.ofbundle.json` 应用）、文件拖入（Task 7/8 的 inbox 扫描 + 人工确认）、外部转写文本（扩展名映射 `txt/md → note`）。
+- §5 错误处理：iCloud 占位与 dataless 文件 → Task 8；隔离区 → Task 8；temp+rename 原子写与补偿 → Task 7；口令无找回（错口令 = VaultError 明确报错）→ Task 3。
+- §6 测试策略：Node 单测（Task 2-12）+ Electron E2E（Task 13）。
+
+**已知偏差（已在对应任务中注明，不视为计划缺口）**
+1. §4 的"±2h 时间窗 + EXIF 拍摄时间聚类"在 P1 简化为"mtime 同日事件建议"（Task 8 `suggestEventId`）；EXIF 读取延后到后续计划，事件归属始终人工确认。
+2. 加密备份容器为自研 `OFBK1`（VACUUM INTO 加密库 + zip + AES-256-GCM，Task 11），规格未逐字规定容器格式；恢复流程（解包回 vault）属于后续计划，本计划交付可校验的备份与解密读取。
+3. Task 10 清除范围以访谈为轴，直接挂 event 的采集物不级联（规格 §3 PIPL 清除的 P1 边界）。
+4. renderer 是最小 vanilla 调试台（满足 E2E 冒烟），完整桌面 UI 属后续计划。
+5. 引用 ID `seq` 按当日同城市已发引用计数 + 1（Task 11），并发窗口内冲突由 ref_id 唯一索引兜底并提示重试。
+
+**占位符扫描**：无 TBD/TODO/"以后再定"；所有代码步骤含完整可运行代码。
+
+**类型一致性核对**
+- `ArtifactRecord`（Task 4 定义）被 Task 7/9/10/11 一致使用。
+- `IpcChannel`/`IPC_CHANNELS`（Task 12 定义于 shared/ipc.ts）与 handlers 记录键、preload 白名单、index.ts 循环一一对应。
+- core 导入均与 Plan 1 交付的导出核对：`createEntry / verifyChain / GENESIS_PREV_HASH / decodeBundle / encodeBundle / makeRefId / parseRefId / computePayloadHash / sha256Hex` 及各 zod schema。
+- 服务间依赖顺序与 Tasks 编号一致：migrations(2) → vault(3) → repos(4) → evidence(5) → registry(6) → ingest(7) → inbox(8) → verify(9) → purge(10) → export(11) → shell(12) → e2e(13)。
