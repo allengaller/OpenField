@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3-multiple-ciphers';
 import { computePayloadHash } from '@openfield/core';
 import { chmodSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { appendEntry } from './evidence';
 import { listArtifactsByEncounter, listConsentsByEncounter, listMemos } from './repos';
 
@@ -40,6 +40,10 @@ export function purgeSubject(
   // 先删文件再删库：若 DB 事务失败，隐私已消失、登记残留会被 verify 以 original-missing 可见报告
   for (const a of artifacts) {
     const dir = join(originalsRoot, a.id);
+    const rel = relative(originalsRoot, dir);
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+      throw new Error(`artifact 目录越界，拒绝删除：${a.id}`); // A14：id 来自 DB，不得借路径穿越删到 originalsRoot 之外
+    }
     try {
       for (const f of readdirSync(dir)) chmodSync(join(dir, f), 0o644); // A12：封存件 0444，先恢复可写（Windows 只读位阻止删除；POSIX 无害）
     } catch {
