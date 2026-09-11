@@ -1327,14 +1327,18 @@ describe('registry', () => {
     expect(() => createEncounterWithEntry(db, Encounter.parse({ ...encounter, id: 'enc-2', eventId: 'evt-nope' }))).toThrow(/不存在/);
   });
 
-  it('buildDailyJournal：聚合当日内容为 daily 草稿，重复调用幂等', () => {
+  it('buildDailyJournal：聚合当日内容为 daily 草稿并入链 CREATE_MEMO，重复调用幂等且链长不变（A4）', () => {
     const memo = buildDailyJournal(db, '2026-09-09', { now: 1757462400000 });
     expect(memo.type).toBe('daily');
     expect(memo.confirmedAt).toBeNull();
     expect(memo.content).toContain('evt-1');
     expect(memo.content).toContain('enc-1');
+    expect(listEvidenceEntries(db).at(-1)?.action).toBe('CREATE_MEMO');
+    expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+    const chainLen = listEvidenceEntries(db).length;
     const again = buildDailyJournal(db, '2026-09-09');
     expect(again.id).toBe(memo.id);
+    expect(listEvidenceEntries(db).length).toBe(chainLen);
   });
 
   it('confirmMemoWithEntry：确认时间落库且 MEMO_CONFIRM 入链', () => {
@@ -1362,7 +1366,7 @@ import { computePayloadHash, Encounter, FieldEvent, type EvidenceEntry, type Mem
 import { appendEntry } from './evidence';
 import {
   confirmMemo, insertEncounter, insertFieldEvent, insertMemo, listArtifacts, listArtifactsByEncounter,
-  listEncountersByEvent, listFieldEvents,
+  listEncountersByEvent, listFieldEvents, listMemos,
 } from './repos';
 
 export function createEventWithEntry(
@@ -1436,16 +1440,21 @@ function localTimeline(db: Database.Database, date: string): string {
 export function buildDailyJournal(db: Database.Database, date: string, opts: { now?: number } = {}): Memo {
   const existing = listMemos(db).find((m) => m.type === 'daily' && m.id === `journal-${date}`);
   if (existing) return existing;
+  const now = opts.now ?? Date.now();
   const memo: Memo = {
     id: `journal-${date}`,
     linkedArtifactIds: [],
     type: 'daily',
     content: localTimeline(db, date),
-    createdAt: opts.now ?? Date.now(),
+    createdAt: now,
     confirmedAt: null,
   };
-  insertMemo(db, memo);
-  return memo;
+  const tx = db.transaction((): Memo => {
+    insertMemo(db, memo);
+    appendEntry(db, { ts: now, actor: 'desktop', action: 'CREATE_MEMO', payloadHash: computePayloadHash(memo) });
+    return memo;
+  });
+  return tx();
 }
 
 export function confirmMemoWithEntry(
