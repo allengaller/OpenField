@@ -183,6 +183,10 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 }
 ```
 
+**A7 — 篡改检测用例与 A1 触发器冲突修正（执行期发现，2026-09-11）：** 正文 Task 5 与 Task 9 的"篡改"用例直接 `UPDATE evidence_log`，与 A1 的 append-only 触发器冲突（UPDATE 会抛 'evidence_log is append-only'）。修正口径：测试内先 `DROP TRIGGER evidence_log_no_update; DROP TRIGGER evidence_log_no_delete;`（模拟攻击者绕过应用层约定直接改库），篡改后再验证 `verifyChain` 报告断链；两处正文代码已就地更新为可执行版本。Task 5 用独立临时 vault（避免污染共享 fixture）；Task 9 的 `seededVault()` 本就每用例独立，直接在 try 块开头 DROP。
+
+**A8 — @hapi/sntp 类型声明（执行期发现，2026-09-11）：** @hapi/sntp@4 不自带 TS 声明，Task 5 按正文实现会 TS7016（与 A6 同类问题）。修正：Task 5 额外新增 `apps/desktop/src/types/hapi__sntp.d.ts`（ambient `declare module '@hapi/sntp'`，仅声明 `offset(options?: { host?: string; port?: number; timeout?: number }): Promise<number>`）；Task 5 文件清单相应为 3 个文件。选择 ambient 声明而非引入 `@types/hapi__sntp` 依赖，避免 Task 5 触碰 package.json / pnpm-lock.yaml。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -1153,13 +1157,19 @@ describe('appendEntry', () => {
     expect(getLastEntry(db)?.seq).toBe(1);
   });
 
-  it('直接改库篡改 entry_hash 会被 verifyChain 检出', () => {
-    db.prepare('UPDATE evidence_log SET entry_hash = ? WHERE seq = 0').run('f'.repeat(64));
-    const result = verifyChain(listEvidenceEntries(db));
-    expect(result.ok).toBe(false);
-    // 还原，避免污染其他测试
-    db.prepare('DELETE FROM evidence_log WHERE seq = 1').run();
-    db.prepare('DELETE FROM evidence_log WHERE seq = 0').run();
+  it('直接改库篡改 entry_hash 会被 verifyChain 检出（DROP 触发器模拟越权篡改，A7）', () => {
+    const tampered = makeTestVault();
+    try {
+      appendEntry(tampered.db, { ts: 1757376000000, actor: 'desktop', action: 'CREATE_EVENT', payloadHash: 'a'.repeat(64) });
+      appendEntry(tampered.db, { ts: 1757376000001, actor: 'desktop', action: 'INGEST_ARTIFACT', payloadHash: 'b'.repeat(64) });
+      tampered.db.exec('DROP TRIGGER evidence_log_no_update; DROP TRIGGER evidence_log_no_delete;');
+      tampered.db.prepare('UPDATE evidence_log SET entry_hash = ? WHERE seq = 0').run('f'.repeat(64));
+      const result = verifyChain(listEvidenceEntries(tampered.db));
+      expect(result.ok).toBe(false);
+    } finally {
+      tampered.db.close();
+      cleanupTestVault(tampered.home);
+    }
   });
 });
 
@@ -2158,6 +2168,7 @@ describe('runVerify', () => {
   it('evidence_log 被篡改 → chainOk=false 且 brokenAt 定位到 seq', async () => {
     const { db, originalsRoot, home } = await seededVault();
     try {
+      db.exec('DROP TRIGGER evidence_log_no_update; DROP TRIGGER evidence_log_no_delete;'); // A7：模拟越权篡改
       db.prepare('UPDATE evidence_log SET payload_hash = ? WHERE seq = 0').run('f'.repeat(64));
       const report = await runVerify(db, originalsRoot);
       expect(report.chainOk).toBe(false);
