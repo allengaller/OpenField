@@ -17,3 +17,4 @@ docs/fieldwork/references/*.html
 
 # Root-level scratch downloads (same personal-use policy)
 /oro49592*
+apps/desktop/out/
