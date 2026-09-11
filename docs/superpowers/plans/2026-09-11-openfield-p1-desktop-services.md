@@ -195,6 +195,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A12 — purge 删除前恢复封存件可写位（Task 7 评审遗留事项，2026-09-11）：** ingest 封存时把原始件 chmod 0444；POSIX 的 unlink 只看父目录写位、`rmSync` 可直接删除，但 Windows 上文件只读属性会阻止删除。Task 10 的文件删除循环在 `rmSync` 前先 `readdirSync` + `chmodSync(0o644)` 恢复目录内文件可写位（目录缺失则交给 `rmSync` 的 force），POSIX 上无害、Windows 上必要。正文已就地更新。
 
+**A13 — Task 10 测试夹具与仓储现实对齐（执行期发现，2026-09-11）：** repos 仓储对 participants 的写入原语是 `upsertParticipant`（并无 `insertParticipant`），Task 10 测试的导入与两处调用相应改为 `upsertParticipant`，Interfaces 消费清单同步修正；ConsentRecord 的 `withdrawnAt` 因 `z.infer` 输出类型必填（zod `.default(null)` 仅在运行时兜底），测试字面量补 `withdrawnAt: null` 以过 typecheck。运行行为均无变化。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -2364,7 +2366,7 @@ git commit -m "feat(desktop): verify service replaying chain, rehashing original
 - Test: `apps/desktop/test/purge.test.ts`
 
 **Interfaces:**
-- Consumes: core 的 `computePayloadHash`；evidence（Task 5）的 `appendEntry`；repos（Task 4）的 `listArtifactsByEncounter / listConsentsByEncounter / listMemos / setRealName / getRealName / insertParticipant / insertFieldEvent / insertEncounter / insertConsentRecord / insertMemo`；ingest（Task 7）的 `ingestFile`
+- Consumes: core 的 `computePayloadHash`；evidence（Task 5）的 `appendEntry`；repos（Task 4）的 `listArtifactsByEncounter / listConsentsByEncounter / listMemos / setRealName / getRealName / upsertParticipant / insertFieldEvent / insertEncounter / insertConsentRecord / insertMemo`；ingest（Task 7）的 `ingestFile`
 - Produces:
   - `interface PurgeScope { pseudonym: string; encounters: number; consents: number; artifacts: number; memos: number }`
   - `purgeSubject(db, originalsRoot: string, input: { pseudonym: string; confirmToken: string; actor: string; ts?: number }): PurgeScope`
@@ -2389,7 +2391,7 @@ import { ingestFile } from '../src/main/services/ingest';
 import { listEvidenceEntries } from '../src/main/services/evidence';
 import {
   getArtifact, getEncounter, getParticipant, getRealName, insertConsentRecord, insertEncounter,
-  insertFieldEvent, insertMemo, insertParticipant, listMemos, setRealName,
+  insertFieldEvent, insertMemo, listMemos, setRealName, upsertParticipant,
 } from '../src/main/services/repos';
 import { purgeSubject } from '../src/main/services/purge';
 
@@ -2398,12 +2400,12 @@ const fixDir = mkdtempSync(join(tmpdir(), 'of-purge-'));
 let artifactId = '';
 
 beforeAll(async () => {
-  insertParticipant(db, Participant.parse({ pseudonym: 'P01', industry: '花卉批发' }));
-  insertParticipant(db, Participant.parse({ pseudonym: 'P02', industry: '花卉零售' }));
+  upsertParticipant(db, Participant.parse({ pseudonym: 'P01', industry: '花卉批发' }));
+  upsertParticipant(db, Participant.parse({ pseudonym: 'P02', industry: '花卉零售' }));
   insertFieldEvent(db, FieldEvent.parse({ id: 'evt-1', date: '2026-09-09', cityCode: 'KMG', locationName: '斗南花市' }));
   insertEncounter(db, Encounter.parse({ id: 'enc-1', eventId: 'evt-1', participantRef: 'P01', samplingReason: '关键知情人', startedAt: 1757376100000 }));
   insertEncounter(db, Encounter.parse({ id: 'enc-2', eventId: 'evt-1', participantRef: 'P02', samplingReason: '对照样本', startedAt: 1757376200000 }));
-  insertConsentRecord(db, { id: 'con-1', encounterId: 'enc-1', templateType: 'recording', scope: '仅本研究' });
+  insertConsentRecord(db, { id: 'con-1', encounterId: 'enc-1', templateType: 'recording', scope: '仅本研究', withdrawnAt: null });
   setRealName(db, 'P01', '张三', 1757376000000);
   const src = join(fixDir, 'p01-interview.wav');
   writeFileSync(src, 'P'.repeat(512));
