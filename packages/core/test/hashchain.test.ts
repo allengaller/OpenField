@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { ZodError } from 'zod';
 import { computePayloadHash } from '../src/canonical';
 import { GENESIS_PREV_HASH, computeEntryHash, createEntry, verifyChain } from '../src/hashchain';
 import type { EvidenceAction, EvidenceEntry } from '../src/entities';
@@ -49,7 +50,7 @@ describe('createEntry 输入校验', () => {
         action: 'CREATE_EVENT',
         payloadHash: 'EXPORT|' + 'a'.repeat(57),
       }),
-    ).toThrow();
+    ).toThrow(ZodError);
   });
   it.each([0, -1, 1.5])('拒绝非法 ts %s', (badTs) => {
     expect(() =>
@@ -59,7 +60,7 @@ describe('createEntry 输入校验', () => {
         action: 'INGEST_ARTIFACT',
         payloadHash: computePayloadHash({ artifactId: 'art-x' }),
       }),
-    ).toThrow();
+    ).toThrow(ZodError);
   });
   it.each(['', 'u|v', 'a'.repeat(129)])('拒绝非法 actor %s', (badActor) => {
     expect(() =>
@@ -69,7 +70,7 @@ describe('createEntry 输入校验', () => {
         action: 'INGEST_ARTIFACT',
         payloadHash: computePayloadHash({ artifactId: 'art-x' }),
       }),
-    ).toThrow();
+    ).toThrow(ZodError);
   });
   it('拒绝未定义的 action', () => {
     expect(() =>
@@ -79,7 +80,17 @@ describe('createEntry 输入校验', () => {
         action: 'NOPE' as EvidenceAction,
         payloadHash: computePayloadHash({ artifactId: 'art-x' }),
       }),
-    ).toThrow();
+    ).toThrow(ZodError);
+  });
+  it('拒绝畸形 prev（上一条不通过 EvidenceEntry schema）', () => {
+    expect(() =>
+      createEntry({ seq: 0.5, entryHash: 'garbage' } as unknown as EvidenceEntry, {
+        ts: 1757376000000,
+        actor: 'desktop',
+        action: 'INGEST_ARTIFACT',
+        payloadHash: computePayloadHash({ artifactId: 'art-x' }),
+      }),
+    ).toThrow(ZodError);
   });
 });
 
@@ -149,17 +160,21 @@ describe('verifyChain schema 前置校验', () => {
         prevHash: chain[0]!.entryHash,
       }),
     };
-    expect(verifyChain([chain[0]!, badEntry])).toEqual({
-      ok: false,
-      brokenAt: 1,
-      reason: '条目不符合 EvidenceEntry schema',
-    });
+    const r = verifyChain([chain[0]!, badEntry]);
+    expect(r).toMatchObject({ ok: false, brokenAt: 1 });
+    expect(r.ok === false && r.reason).toContain('EvidenceEntry schema');
+    expect(r.ok === false && r.reason).toContain('actor');
   });
   it('数组中的 null 条目 → brokenAt=-1 而非抛 TypeError', () => {
-    expect(verifyChain([null as unknown as EvidenceEntry])).toEqual({
-      ok: false,
-      brokenAt: -1,
-      reason: '条目不符合 EvidenceEntry schema',
-    });
+    const r = verifyChain([null as unknown as EvidenceEntry]);
+    expect(r).toMatchObject({ ok: false, brokenAt: -1 });
+    expect(r.ok === false && r.reason).toContain('EvidenceEntry schema');
+  });
+  it('seq 为 NaN 的条目 → brokenAt=-1 而非 NaN 泄漏', () => {
+    const r = verifyChain([{ seq: NaN } as unknown as EvidenceEntry]);
+    expect(r).toMatchObject({ ok: false, brokenAt: -1 });
+    expect(r.ok === false && r.reason).toContain('EvidenceEntry schema');
+    // NaN 经 JSON.stringify 会变成 null，这里钉住 brokenAt 必须是数字 -1
+    expect(JSON.parse(JSON.stringify(r)).brokenAt).toBe(-1);
   });
 });

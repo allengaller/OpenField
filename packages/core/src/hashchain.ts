@@ -20,13 +20,14 @@ export function computeEntryHash(
 }
 
 export function createEntry(prev: EvidenceEntry | null, input: EntryInput): EvidenceEntry {
+  const p = prev ? EvidenceEntry.parse(prev) : null;
   const candidate = {
-    seq: prev ? prev.seq + 1 : 0,
+    seq: p ? p.seq + 1 : 0,
     ts: EpochMs.parse(input.ts),
     actor: Actor.parse(input.actor),
     action: EvidenceAction.parse(input.action),
     payloadHash: Sha256.parse(input.payloadHash),
-    prevHash: prev ? prev.entryHash : GENESIS_PREV_HASH,
+    prevHash: p ? p.entryHash : GENESIS_PREV_HASH,
   };
   return { ...candidate, entryHash: computeEntryHash(candidate) };
 }
@@ -36,11 +37,16 @@ export type ChainVerifyResult = { ok: true } | { ok: false; brokenAt: number; re
 export function verifyChain(entries: EvidenceEntry[]): ChainVerifyResult {
   let prev: EvidenceEntry | null = null;
   for (const e of entries) {
-    if (!EvidenceEntry.safeParse(e).success) {
+    const schemaCheck = EvidenceEntry.safeParse(e);
+    if (!schemaCheck.success) {
+      const issue = schemaCheck.error.issues[0];
+      const loc = issue && issue.path.length > 0 ? `${issue.path.join('.')}: ` : '';
       return {
         ok: false,
-        brokenAt: typeof e?.seq === 'number' ? e.seq : -1,
-        reason: '条目不符合 EvidenceEntry schema',
+        brokenAt: Number.isSafeInteger(e?.seq) && e.seq >= 0 ? e.seq : -1,
+        reason: issue
+          ? `条目不符合 EvidenceEntry schema（${loc}${issue.message}）`
+          : '条目不符合 EvidenceEntry schema',
       };
     }
     if (e.seq !== (prev ? prev.seq + 1 : 0)) {
