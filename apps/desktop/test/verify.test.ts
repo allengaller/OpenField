@@ -79,4 +79,19 @@ describe('runVerify', () => {
       cleanupTestVault(home);
     }
   });
+
+  it('originals 整目录消失 → original-missing 与目录不可读均入报告，不抛出（A11）', async () => {
+    const { db, originalsRoot, home } = await seededVault();
+    try {
+      rmSync(originalsRoot, { recursive: true, force: true });
+      const report = await runVerify(db, originalsRoot);
+      expect(report.chainOk).toBe(true);
+      expect(report.issues).toEqual([
+        expect.objectContaining({ kind: 'original-missing' }),
+        expect.objectContaining({ kind: 'unreadable', path: originalsRoot }),
+      ]);
+    } finally {
+      cleanupTestVault(home);
+    }
+  });
 });

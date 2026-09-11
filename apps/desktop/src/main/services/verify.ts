@@ -57,13 +57,16 @@ export async function runVerify(db: Database.Database, originalsRoot: string): P
   let names: string[];
   try {
     names = await readdir(originalsRoot);
-  } catch {
+  } catch (err) {
+    issues.push({ kind: 'unreadable', message: `originals 目录不可读，孤儿目录检查未执行：${String(err)}`, path: originalsRoot }); // A11：检查失败必须可见，不得静默
     names = [];
   }
   for (const name of names) {
     if (known.has(name)) continue;
     const full = join(originalsRoot, name);
-    if ((await stat(full)).isDirectory()) {
+    const st = await stat(full).catch(() => null); // A11：条目消失等 stat 失败 → 跳过，不使整个报告作废
+    if (!st) continue;
+    if (st.isDirectory()) {
       issues.push({ kind: 'orphan-directory', message: `originals 下存在未登记目录：${name}`, path: full });
     }
   }
