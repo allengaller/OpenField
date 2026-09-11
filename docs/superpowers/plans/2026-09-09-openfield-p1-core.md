@@ -871,15 +871,15 @@ Expected: FAIL（Cannot find module '../src/bundle'）
 `packages/core/src/bundle.ts`:
 ```ts
 import { z } from 'zod';
-import { FieldEvent, Encounter, Participant, ConsentRecord, Memo, Gps } from './entities';
+import { FieldEvent, Encounter, Participant, ConsentRecord, Memo, Gps, Sha256, EpochMs } from './entities';
 
 export const MediaRef = z.object({
   filename: z.string().min(1),
-  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  sha256: Sha256,
   bytes: z.number().int().nonnegative(),
   mime: z.string().min(1),
   type: z.enum(['audio', 'photo', 'note', 'doc']),
-  capturedAt: z.number().int().positive(),
+  capturedAt: EpochMs,
   gps: Gps.optional(),
   encounterId: z.string().optional(),
 });
@@ -1163,3 +1163,4 @@ git commit -m "feat(core): public exports and cross-module integration test"
   - `Artifact.refId` 加 `min(1)`；`confirmedAt`/`withdrawnAt` 改用 `EpochMs.nullable().default(null)`（行为不变）。
   - 测试新增 8 个：Memo / InboxItem / TimeSyncRecord 覆盖、camelCase realName 拒绝、大写 sha256 拒绝、不存在日历日期拒绝。
   - 原 Step 4 预期「14 tests」为估算偏差（`it.each` 展开 4 例，实际 17）；追加后为 26。上方代码块已同步为最终状态。
+  - Task 5（执行时）：`MediaRef` 的 `sha256`/`capturedAt` 改为引用 Task 2 加固后导出的 `Sha256`/`EpochMs`，不再内联重写同一哈希规则（即 Task 2 评审「导出以供 Task 5 引用」的落地）。上方 Task 5 代码块已同步。
