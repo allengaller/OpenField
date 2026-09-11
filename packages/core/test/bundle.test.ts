@@ -56,4 +56,8 @@ describe('bundle v1', () => {
   it('非 JSON 文本 → BundleValidationError 而非 SyntaxError 泄漏', () => {
     expect(() => decodeBundle('not json')).toThrow(BundleValidationError);
   });
+  it('拒绝未知顶层字段', () => {
+    const bad = { ...validBundle, extraField: 'x' };
+    expect(() => decodeBundle(JSON.stringify(bad))).toThrow(BundleValidationError);
+  });
 });

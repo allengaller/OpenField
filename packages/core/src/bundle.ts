@@ -13,7 +13,7 @@ export const MediaRef = z.object({
 });
 export type MediaRef = z.infer<typeof MediaRef>;
 
-export const BundleV1 = z.object({
+export const BundleV1 = z.strictObject({
   schemaVersion: z.literal(1),
   id: z.string().min(1),
   deviceId: z.string().min(1),
