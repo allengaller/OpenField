@@ -1190,3 +1190,7 @@ git commit -m "feat(core): public exports and cross-module integration test"
   - Task 6（规格评审发现的计划内缺陷）：`#T` 是 MM:SS（分钟可为 00–99，上限 #T99:59 = 5999s），但 `parseRefId` 原守卫 `minutes > 59` 会拒绝 make 侧合法产出的 60–99 分钟，往返在偏移 ≥3600s 时断裂。守卫改为 `minutes > 99 || seconds > 59`（分钟两位数字已被正则限定 ≤99，99 分支为防御性冗余）。新增 3600s / 5999s 往返测试。上方代码块已同步。
   - Task 6（质量评审后追加）：make/parse 两侧均增加日历日期校验（复用 Task 2 导出的 `IsoDate` = `z.iso.date()`），拒绝 `2026-02-31` 这类格式合法但不存在的日期——引用 ID 是学术输出的引用表面，`OF-20260231` 会被印进论文。`IsoDate` 随之导出。新增 make/parse 各一个日历拒绝测试。上方代码块已同步。
   - Task 1（终审补充）：commit 485e2cb 对 `tsconfig.base.json` 加固（`verbatimModuleSyntax`、`lib: ["ESNext"]`）并在根 `package.json` 钉住 `packageManager: pnpm@11.6.0`——这些改动未回写上方 Task 1 代码块，以仓库实际状态为准。
+- **最终独立审查**（2026-09-11，覆盖 15ac4dd..77cbbe0 全部实现）：判定可交付。70/70 测试真实通过、typecheck 干净、隐私边界在类型层强制（`z.strictObject`）、五处执行期偏差均判定为合理加固。遗留给 Plan 2 的义务：
+  1. **哈希链尾部截断不可检测**（审查对抗验证发现，设计固有限制）：删除链尾若干条后剩余前缀完全自洽，`verifyChain` 返回 ok。Plan 2 的 VerifyService 必须把链头哈希外置锚定（如导出/备份时记录 head hash，周期性比对），否则「丢失证据」无法与「从未采集」区分。
+  2. `makeRefId` 的 `offsetSeconds` 缺 `Number.isInteger` 整数校验：`1.5` 会产出 `#T00:1.5` 畸形 ID（parse 侧会拒绝，往返破裂）。修复成本一行，随 Plan 2 顺带处理。
+  3. `encodeBundle` 对程序员错误抛裸 `ZodError`（decode 路径无泄漏，可接受）；Plan 2 UI 层调用处需自行包装展示。
