@@ -191,6 +191,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A10 — inbox 扫描健壮性与 mediaRef 幂等（质量评审 CHANGES_REQUIRED，2026-09-11）：** Task 8 首版实现评审发现三处 Important 问题，修正后正文已就地更新：① scanOnce 的 `stat(full)` 改为 `.catch(() => null)`，失败跳过该文件不中断整轮扫描；② 隔离区分支记录底层错误（console.warn）、隔离文件名加 8 位随机前缀防同名覆盖、mkdir/rename 再包一层 try/catch（移动失败仅告警跳过）；③ applyBundle 的 mediaRefs 以 `listInboxItems` 现存 sourcePath 集合去重（重复应用不再产生重复 pending 项），scanOnce 去重条件扩为 pending 或 ingested 同路径均跳过；④ 随手收敛：去掉多余的 `'pending' as InboxStatus` 断言与 InboxStatus 导入、repos.existsWithId 上方加"table 仅限字面量"防注入注释、inbox.test.ts 删除未用导入。测试相应增加"重复应用含 mediaRefs 的 bundle 不产生重复 pending 项"回归用例（inbox 6 个，全套 40 个）。
 
+**A11 — verify 报告健壮性（Task 9 质量评审 CHANGES_REQUIRED，2026-09-11）：** runVerify 两处异常路径违背"报告生成器"契约（收集 issues 而非抛出；验证工具不得静默漏检），修正后正文已就地更新：① 孤儿目录循环中未防护的 `stat(full)`（悬空符号链接 / EACCES / readdir 与 stat 之间条目消失）会使整个报告 reject、丢失链与其他全部检查结果——改为 `.catch(() => null)` 后跳过该条目；② `readdir(originalsRoot)` 失败被静默吞掉，"未检出孤儿"与"未检查孤儿"不可区分——改为向报告追加一条 `kind: 'unreadable'`（`path` = originalsRoot，message 注明孤儿检查未执行），`VerifyIssue` / `VerifyReport` 接口不变。测试增加"originals 整目录消失 → original-missing 与目录不可读均入报告、不抛出"用例，verify 6 个，全套 46 个。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -2148,7 +2150,7 @@ git commit -m "feat(desktop): inbox scan with icloud/empty skip, bundle apply an
   - `type VerifyIssueKind = 'hash-mismatch' | 'original-missing' | 'orphan-directory' | 'unreadable'`
   - `interface VerifyIssue { kind: VerifyIssueKind; message: string; artifactId?: string; path?: string }`
   - `interface VerifyReport { chainOk: boolean; chainBrokenAt: number | null; chainReason: string | null; issues: VerifyIssue[]; artifactCount: number; checkedAt: number }`
-  - `runVerify(db, originalsRoot: string): Promise<VerifyReport>`——三段检查：①`listEvidenceEntries` + `verifyChain` 重放；②逐个 artifact 重算 `sha256File(originalPath)` 比对（ENOENT → `original-missing`，其他读错误 → `unreadable`）；③`readdir(originalsRoot)` 中不对应任何 artifact id 的**目录** → `orphan-directory`
+  - `runVerify(db, originalsRoot: string): Promise<VerifyReport>`——三段检查：①`listEvidenceEntries` + `verifyChain` 重放；②逐个 artifact 重算 `sha256File(originalPath)` 比对（ENOENT → `original-missing`，其他读错误 → `unreadable`）；③`readdir(originalsRoot)` 中不对应任何 artifact id 的**目录** → `orphan-directory`；readdir 失败 → 报告追加 `kind: 'unreadable'`（path = originalsRoot，注明孤儿检查未执行），不抛出（A11）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2235,6 +2237,21 @@ describe('runVerify', () => {
       cleanupTestVault(home);
     }
   });
+
+  it('originals 整目录消失 → original-missing 与目录不可读均入报告，不抛出（A11）', async () => {
+    const { db, originalsRoot, home } = await seededVault();
+    try {
+      rmSync(originalsRoot, { recursive: true, force: true });
+      const report = await runVerify(db, originalsRoot);
+      expect(report.chainOk).toBe(true);
+      expect(report.issues).toEqual([
+        expect.objectContaining({ kind: 'original-missing' }),
+        expect.objectContaining({ kind: 'unreadable', path: originalsRoot }),
+      ]);
+    } finally {
+      cleanupTestVault(home);
+    }
+  });
 });
 ```
 
@@ -2306,13 +2323,16 @@ export async function runVerify(db: Database.Database, originalsRoot: string): P
   let names: string[];
   try {
     names = await readdir(originalsRoot);
-  } catch {
+  } catch (err) {
+    issues.push({ kind: 'unreadable', message: `originals 目录不可读，孤儿目录检查未执行：${String(err)}`, path: originalsRoot }); // A11：检查失败必须可见，不得静默
     names = [];
   }
   for (const name of names) {
     if (known.has(name)) continue;
     const full = join(originalsRoot, name);
-    if ((await stat(full)).isDirectory()) {
+    const st = await stat(full).catch(() => null); // A11：条目消失等 stat 失败 → 跳过，不使整个报告作废
+    if (!st) continue;
+    if (st.isDirectory()) {
       issues.push({ kind: 'orphan-directory', message: `originals 下存在未登记目录：${name}`, path: full });
     }
   }
@@ -2324,7 +2344,7 @@ export async function runVerify(db: Database.Database, originalsRoot: string): P
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `pnpm --filter @openfield/desktop test -- verify`
-Expected: PASS（5 个测试）。
+Expected: PASS（6 个测试，全套 46 个）。
 
 - [ ] **Step 5: Commit**
 
