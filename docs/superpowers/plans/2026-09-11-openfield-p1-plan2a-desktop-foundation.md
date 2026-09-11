@@ -1623,3 +1623,15 @@ git commit -m "docs(plan): record plan 2a execution deviations"
 - **占位符扫描**：无 TBD/TODO；所有代码步骤含完整代码。
 - **类型一致性**：`Db`/`VaultPaths`（Task 2/6 定义，Task 4/5/7 消费）、`appendWithinTx`/`getHead`/`getAllEntries`/`verifyAll`（Task 4）、`insertFieldEvent/getFieldEvent/insertEncounter/insertParticipant/insertIdentity/insertArtifact/getArtifactBySha256/insertConsentRecord/insertMemo/insertInboxItem/existsById/existsParticipant`（Task 5 定义并在 Task 7 使用）、`IngestOutcome`/`IngestBundleOutcome` 字段与测试断言逐一对齐。core 侧仅增补枚举值（Task 5），不改既有签名。
 - **已知取舍**：(1) 测试统一跑在 Electron ABI（`ELECTRON_RUN_AS_NODE=1`），`pnpm test` 在 core 与 desktop 行为一致；(2) `participant_identity` 与 `participant` 同库不同表，JOIN 纪律由查询层约定（Plan 3 UI 不 JOIN identity）；(3) 触发器只挡 SQL 层篡改，绕过应用层的篡改由 verifyAll 检出（Task 4 bareDb 测试）；(4) bundle 嵌套实体仍为 strip 模式（Plan 1 已记录该取舍，本计划不收紧）；(5) `openDb` 显式开启 `foreign_keys = ON`（SQLite 默认关闭）——证据系统不接受孤儿记录，所有引用测试均先建被引实体。
+
+## 仲裁记录与移交要点（2026-09-11）
+
+用户仲裁：桌面端实现由并行会话的 **Plan 2**（`2026-09-11-openfield-p1-desktop-services.md`）接管；本计划停止执行，转为审查参考。本计划 Task 1 的脚手架已落地（commit 32c7634：Electron 33 + electron-vite 5 + Electron-ABI 测试链路），Plan 2 的执行者可吸收或覆盖（其钉版 Electron 44，需调整 package.json 与 preload 格式认知）。
+
+**本计划已解决、建议 Plan 2 执行者直接采纳的设计点：**
+
+1. **`evidence_log` append-only 触发器**（本计划 Task 3）：`BEFORE UPDATE/DELETE ... RAISE(ABORT, 'evidence_log is append-only')`——DB 层兜底，比纯代码纪律强；绕过触发器的篡改由 verifyAll 检出。
+2. **`PRAGMA foreign_keys = ON`**（本计划 Task 2/自检取舍 5）：SQLite 默认关闭外键；证据系统不接受孤儿记录，相关测试须先建被引实体。
+3. **core 动作增补 `CREATE_PARTICIPANT` / `CREATE_MEMO`**（本计划 Task 5）：vault 内每一行都必须有链上来源；若 Plan 2 的 repos/evidence 写 participant/memo 行而无对应链上动作，会产出无链记录。此增补尚未在 core 落地（本计划停止于 Task 1），Plan 2 需自行决定采纳或给出替代方案并同步规格 §2.2。
+4. **错误语义分型**：`VaultKeyError`（口令错误 vs vault 损坏，openVault 用 sqlite_master 探测判别）、bundle 媒体三分态（ingested / pending-缺失 / quarantined-哈希不符，落 inbox_item）、原始件 temp+rename+chmod 0444、`pnpm-lock.yaml` 随依赖变更必须提交。
+5. **测试环境与原生 ABI**：若沿用 better-sqlite3-multiple-ciphers 13 的 N-API 预编译（Plan 2 的选型，Node/Electron 通用），则无需 Electron-ABI 专链，普通 vitest 即可——Plan 2 的思路成立；本计划的 `ELECTRON_RUN_AS_NODE` 链路仅在使用 Electron ABI 专版时才需要。
