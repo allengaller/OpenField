@@ -8,7 +8,10 @@ const $ = (id: string): HTMLElement => {
 
 async function invoke<T>(channel: string, payload?: unknown): Promise<T> {
   const res = (await window.openfield.invoke(channel, payload)) as IpcResult<T>;
-  if (!res.ok) throw new Error(res.error);
+  if (!res.ok) {
+    statusEl.textContent = `错误：${res.error}`;
+    throw new Error(res.error);
+  }
   return res.data;
 }
 
@@ -90,5 +93,8 @@ $('btn-cite').addEventListener('click', async () => {
     artifactId: ($('cite-art') as HTMLInputElement).value,
   });
   citeOutEl.textContent = out.refId;
+});
+window.addEventListener('unhandledrejection', (e) => {
+  statusEl.textContent = `错误：${e.reason instanceof Error ? e.reason.message : String(e.reason)}`;
 });
 window.openfield.onInboxChanged(() => void refreshPending());

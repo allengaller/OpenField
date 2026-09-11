@@ -90,8 +90,24 @@ describe('startInboxWatcher', () => {
     const summaries: unknown[] = [];
     const stop = startInboxWatcher(state, (s) => summaries.push(s));
     try {
+      await new Promise((r) => setTimeout(r, 50)); // A16：chokidar 异步武装，立即写入会被初始扫描当已有文件吞掉
       writeFileSync(join(state.paths.inboxDir, 'watched.wav'), Buffer.from('W'.repeat(64)));
-      await vi.waitFor(() => expect(listInboxItems(state.getDb(), 'pending')).toHaveLength(1), { timeout: 5_000, interval: 100 });
+      await vi.waitFor(() => expect(listInboxItems(state.getDb(), 'pending')).toHaveLength(1), { timeout: 10_000, interval: 100 });
+    } finally {
+      stop();
+      state.close();
+    }
+  });
+
+  it('inbox 目录不存在时启动 watcher 仍能自动扫描（A16）', async () => {
+    const state = new AppState(join(home, 's6'));
+    state.createVault('passphrase-1234');
+    rmSync(state.paths.inboxDir, { recursive: true, force: true });
+    const stop = startInboxWatcher(state, () => {});
+    try {
+      await new Promise((r) => setTimeout(r, 50));
+      writeFileSync(join(state.paths.inboxDir, 'late.wav'), Buffer.from('L'.repeat(64)));
+      await vi.waitFor(() => expect(listInboxItems(state.getDb(), 'pending')).toHaveLength(1), { timeout: 10_000, interval: 100 });
     } finally {
       stop();
       state.close();

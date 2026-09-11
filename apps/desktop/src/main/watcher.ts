@@ -1,8 +1,10 @@
+import { mkdirSync } from 'node:fs';
 import { watch } from 'chokidar';
 import type { AppState } from './state';
 import { scanOnce, type ScanSummary } from './services/inbox';
 
 export function startInboxWatcher(state: AppState, onSummary: (s: ScanSummary) => void): () => void {
+  mkdirSync(state.paths.inboxDir, { recursive: true }); // A16：chokidar 对不存在的目录永不生效（ENOENT 被内部吞掉），先确保目录在
   let timer: NodeJS.Timeout | null = null;
   const schedule = (): void => {
     if (timer) clearTimeout(timer);
