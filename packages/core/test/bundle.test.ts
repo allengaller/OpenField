@@ -109,4 +109,8 @@ describe('bundle 错误面', () => {
   it.each([0, 1.5])('BundleV1 拒绝非法 createdAt %s', (badCreatedAt) => {
     expect(BundleV1.safeParse({ ...validBundle, createdAt: badCreatedAt }).success).toBe(false);
   });
+  it.each(['b|1', 'x'.repeat(129)])('BundleV1 拒绝含 | 或超 128 字符的 bundle id（id 派生入链 actor，须满足 Actor 约束）', (badId) => {
+    const issues = issuesOf(() => decodeBundle(JSON.stringify({ ...validBundle, id: badId })));
+    expect(issues[0]!.path).toBe('id');
+  });
 });

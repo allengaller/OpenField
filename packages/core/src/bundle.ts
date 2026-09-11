@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { FieldEvent, Encounter, Participant, ConsentRecord, Memo, Gps, Sha256, EpochMs, Id } from './entities';
+import { Actor, FieldEvent, Encounter, Participant, ConsentRecord, Memo, Gps, Sha256, EpochMs, Id } from './entities';
 
 export const MediaRef = z.object({
   filename: z.string().min(1),
@@ -15,7 +15,8 @@ export type MediaRef = z.infer<typeof MediaRef>;
 
 export const BundleV1 = z.strictObject({
   schemaVersion: z.literal(1),
-  id: z.string().min(1),
+  // id 会被服务层拼进入链 actor（'bundle:'+id），复用 Actor 约束保证哈希前像无歧义。
+  id: Actor,
   deviceId: z.string().min(1),
   createdAt: EpochMs,
   events: z.array(FieldEvent),
