@@ -199,6 +199,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A14 — purge 删除目标路径围栏（Task 10 质量评审 CHANGES_REQUIRED，2026-09-11）：** `join(originalsRoot, a.id)` 的 `a.id` 来自 DB（`Id` 仅 `min(1)` 约束），id 含 `..` 等时可越出 originalsRoot，配合 `rmSync(recursive, force)` 构成应用内最强破坏原语（Task 12 IPC 是下一个接入点）。修正：删除循环在触盘前用 `relative` 词法围栏校验（空串 / `..` 开头 / 绝对路径 → 抛 `artifact 目录越界，拒绝删除：<id>`），并把测试字面量补 `withdrawnAt: null` 等夹具修正一并落正文。正文已就地更新；测试增加"artifact id 越界 → 拒绝删除且波及目录与登记行原样"用例，purge 4 个，全套 50 个。
 
+**A15 — 引用幂等 + 备份临时文件清理（Task 11 质量评审 CHANGES_REQUIRED，2026-09-11）：** ① `makeCitation` 无重复引用防护：`setArtifactRefId` 是无条件 UPDATE，IPC 重试/双击会对已签发 refId 的 artifact 重新计数、覆盖旧 ID 并追加第二条 EXPORT——学术引用 ID 一经签发不可变更，且 verifyChain 无法察觉这种漂移。修正：artifact 已有 refId 时幂等返回 `{ refId, artifact }`，不写库不入链。② `exportBackup` 中 `backupVault` 位于 try/finally 之外：VACUUM INTO 中途失败（磁盘满/库被锁）会残留残缺的 `${outPath}.tmp-vault.db`，后续对同一 outPath 的备份因「备份目标已存在」持续失败，且抛的是 VaultError 而非 ExportError。修正：调用前 `rmSync(tmpDb, { force: true })` 清掉历史残留，并把 `backupVault` 移入 try 使 finally 全程覆盖。测试增加"重复引用幂等返回既有 refId（链长不变）"与"残留临时文件不阻塞备份"两用例，export 7 个，全套 57 个。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -2563,9 +2565,10 @@ git commit -m "feat(desktop): PIPL subject purge with file-first deletion and to
   - `class ExportError extends Error { code: 'no-encounter' | 'no-event' | 'io' }`
   - `makeCitation(db, input: { artifactId: string; actor: string; ts?: number }): { refId: string; artifact: ArtifactRecord }`
     - artifact 必须已挂 encounter（否则 `no-encounter`）；encounter 的 event 必须存在（否则 `no-event`）
+    - 已有 refId 的 artifact 幂等返回既有 ID，不写库不入链（A15）
     - `seq = COUNT(ref_id LIKE 'OF-<yyyymmdd>-<city>-%') + 1`；`offsetSeconds = clamp(floor((capturedAt - startedAt)/1000), 0, 5999)`
     - 事务内：`setArtifactRefId` + `appendEntry(EXPORT, payloadHash = computePayloadHash({ artifactId, refId }))`；ref_id 唯一索引冲突 → `ExportError('io', '引用 ID 冲突，请重试…')`
-  - `exportBackup(db, paths: VaultPaths, passphrase: string, outPath: string): void`——`backupVault`（VACUUM INTO，加密）到临时文件 → AdmZip 打包 `{ vault.db, originals/** }` → AES-256-GCM 加密写入 outPath
+  - `exportBackup(db, paths: VaultPaths, passphrase: string, outPath: string): void`——`backupVault`（VACUUM INTO，加密）到临时文件 → AdmZip 打包 `{ vault.db, originals/** }` → AES-256-GCM 加密写入 outPath；临时 vault 副本全程受 try/finally 清理，调用前先清历史残留（A15）
   - `readBackup(backupPath: string, passphrase: string): Buffer`——解密并返回 zip Buffer（恢复/校验用）
   - 备份文件格式（自研 `OFBK1` 容器）：`'OFBK1'(5B) + salt(16B) + iv(12B) + tag(16B) + AES-256-GCM 密文`，key = `scryptSync(passphrase, salt, 32)`
 
@@ -2574,7 +2577,7 @@ git commit -m "feat(desktop): PIPL subject purge with file-first deletion and to
 `apps/desktop/test/export.test.ts`:
 ```ts
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -2635,6 +2638,15 @@ describe('makeCitation', () => {
     const r5 = await ingestFixture('a5.wav');
     expect(() => makeCitation(db, { artifactId: r5.artifact.id, actor: 'desktop' })).toThrow(/未挂访谈/);
   });
+
+  it('重复引用同一 artifact 幂等返回既有 refId，不追加 EXPORT（A15）', async () => {
+    const r = await ingestFixture('a6.wav', T0 + 150_000, 'enc-1');
+    const first = makeCitation(db, { artifactId: r.artifact.id, actor: 'desktop' });
+    const chainLen = listEvidenceEntries(db).length;
+    const second = makeCitation(db, { artifactId: r.artifact.id, actor: 'desktop' });
+    expect(second.refId).toBe(first.refId);
+    expect(listEvidenceEntries(db).length).toBe(chainLen);
+  });
 });
 
 describe('exportBackup / readBackup', () => {
@@ -2650,6 +2662,14 @@ describe('exportBackup / readBackup', () => {
 
   it('错误口令解包直接失败（GCM 认证拒绝）', () => {
     expect(() => readBackup(outPath, 'wrong-pass-999')).toThrow();
+  });
+
+  it('残留的临时 vault 文件不阻塞备份（A15）', () => {
+    const retryPath = join(paths.backupsDir, 'retry.ofbackup');
+    writeFileSync(`${retryPath}.tmp-vault.db`, 'stale-from-crash');
+    exportBackup(db, paths, TEST_PASSPHRASE, retryPath);
+    expect(existsSync(`${retryPath}.tmp-vault.db`)).toBe(false);
+    expect(existsSync(retryPath)).toBe(true);
   });
 });
 ```
@@ -2685,6 +2705,7 @@ export function makeCitation(
 ): { refId: string; artifact: ArtifactRecord } {
   const artifact = getArtifact(db, input.artifactId);
   if (!artifact) throw new ExportError('io', `artifact 不存在：${input.artifactId}`);
+  if (artifact.refId) return { refId: artifact.refId, artifact }; // A15：引用 ID 一经签发不可变更，重复调用幂等返回
   if (!artifact.encounterId) throw new ExportError('no-encounter', '采集物未挂访谈，无法定位引用时间与城市');
   const encounter = getEncounter(db, artifact.encounterId);
   if (!encounter) throw new ExportError('no-encounter', `encounter 不存在：${artifact.encounterId}`);
@@ -2724,8 +2745,9 @@ const MAGIC = Buffer.from('OFBK1', 'ascii');
 export function exportBackup(db: Database.Database, paths: VaultPaths, passphrase: string, outPath: string): void {
   if (existsSync(outPath)) throw new ExportError('io', `备份目标已存在：${outPath}`);
   const tmpDb = `${outPath}.tmp-vault.db`;
-  backupVault(db, tmpDb);
   try {
+    rmSync(tmpDb, { force: true }); // A15：清掉上次崩溃残留的临时库，否则 backupVault 会因目标已存在而失败
+    backupVault(db, tmpDb);
     const zip = new AdmZip();
     zip.addFile('vault.db', readFileSync(tmpDb));
     zip.addLocalFolder(paths.originalsRoot, 'originals');
@@ -2756,7 +2778,7 @@ export function readBackup(backupPath: string, passphrase: string): Buffer {
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `pnpm --filter @openfield/desktop test -- export`
-Expected: PASS（5 个测试）。
+Expected: PASS（7 个测试）。
 
 - [ ] **Step 5: Commit**
 
