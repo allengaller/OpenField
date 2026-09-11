@@ -1,13 +1,13 @@
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { computePayloadHash, Encounter, FieldEvent, Participant, verifyChain } from '@openfield/core';
+import { Artifact, computePayloadHash, Encounter, FieldEvent, Participant, verifyChain } from '@openfield/core';
 import { cleanupTestVault, makeTestVault } from './helpers';
 import { ingestFile } from '../src/main/services/ingest';
 import { listEvidenceEntries } from '../src/main/services/evidence';
 import {
-  getArtifact, getEncounter, getParticipant, getRealName, insertConsentRecord, insertEncounter,
+  getArtifact, getEncounter, getParticipant, getRealName, insertArtifact, insertConsentRecord, insertEncounter,
   insertFieldEvent, insertMemo, listMemos, setRealName, upsertParticipant,
 } from '../src/main/services/repos';
 import { purgeSubject } from '../src/main/services/purge';
@@ -61,5 +61,14 @@ describe('purgeSubject', () => {
     expect(last?.action).toBe('PURGE_SUBJECT');
     expect(last?.payloadHash).toBe(computePayloadHash({ pseudonym: 'P01', encounters: 1, consents: 1, artifacts: 1, memos: 1 }));
     expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+  });
+
+  it('artifact id 越界（path traversal）→ 拒绝删除，波及目录与登记行原样（A14）', () => {
+    insertArtifact(db, Artifact.parse({ id: '../innocent', encounterId: 'enc-2', type: 'audio', sha256: 'c'.repeat(64), size: 8, mime: 'audio/wav', capturedAt: 1757376400000, deviceId: 'desktop' }), '/nowhere');
+    mkdirSync(join(home, 'innocent'), { recursive: true });
+    writeFileSync(join(home, 'innocent', 'keep.txt'), 'keep');
+    expect(() => purgeSubject(db, paths.originalsRoot, { pseudonym: 'P02', confirmToken: 'P02', actor: 'desktop', ts: 1757462500000 })).toThrow(/越界/);
+    expect(existsSync(join(home, 'innocent', 'keep.txt'))).toBe(true);
+    expect(getEncounter(db, 'enc-2')).toBeTruthy(); // 事务未执行，登记行未删
   });
 });
