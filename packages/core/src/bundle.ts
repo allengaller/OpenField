@@ -15,8 +15,9 @@ export type MediaRef = z.infer<typeof MediaRef>;
 
 export const BundleV1 = z.strictObject({
   schemaVersion: z.literal(1),
-  // id 会被服务层拼进入链 actor（'bundle:'+id），复用 Actor 约束保证哈希前像无歧义。
-  id: Actor,
+  // id 会被服务层拼进入链 actor（'bundle:'+id），复用 Actor 约束保证哈希前像无歧义；
+  // 上界 121 = 128 − len('bundle:')，保证派生 actor 恒过 Actor.parse。
+  id: Actor.max(121),
   deviceId: z.string().min(1),
   createdAt: EpochMs,
   events: z.array(FieldEvent),

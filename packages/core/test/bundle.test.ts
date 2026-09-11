@@ -113,4 +113,8 @@ describe('bundle 错误面', () => {
     const issues = issuesOf(() => decodeBundle(JSON.stringify({ ...validBundle, id: badId })));
     expect(issues[0]!.path).toBe('id');
   });
+
+  it('BundleV1 接受恰好 121 字符的 bundle id（上界 = 128 − len("bundle:")，派生 actor 恰好过 Actor.parse）', () => {
+    expect(() => decodeBundle(JSON.stringify({ ...validBundle, id: 'x'.repeat(121) }))).not.toThrow();
+  });
 });
