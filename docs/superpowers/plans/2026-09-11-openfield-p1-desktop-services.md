@@ -189,6 +189,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A9 — Task 8 正文与 A4 对齐 + 建议事件日期修偏（执行期发现，2026-09-11）：** ① Task 8 Step 4 的 `applyBundle` 原为不入链旧版，已就地替换为 A4 修订版（逐实体 IfAbsent 新插入时入链，actor `bundle:<id>`、ts `bundle.createdAt`），inbox.ts 导入相应补 `computePayloadHash` 与 `appendEntry`；测试相应断言 bundle 实体链目齐备、verifyChain ok、重复应用链长不变。② scanOnce 建议事件用例原把事件日期硬编码为 '2026-09-09'，但建议匹配依赖文件 mtime 的本地日期（运行日即"今天"），任何其他日期运行必失败；修正为测试内 `localDateStr(Date.now())` 动态生成事件日期。
 
+**A10 — inbox 扫描健壮性与 mediaRef 幂等（质量评审 CHANGES_REQUIRED，2026-09-11）：** Task 8 首版实现评审发现三处 Important 问题，修正后正文已就地更新：① scanOnce 的 `stat(full)` 改为 `.catch(() => null)`，失败跳过该文件不中断整轮扫描；② 隔离区分支记录底层错误（console.warn）、隔离文件名加 8 位随机前缀防同名覆盖、mkdir/rename 再包一层 try/catch（移动失败仅告警跳过）；③ applyBundle 的 mediaRefs 以 `listInboxItems` 现存 sourcePath 集合去重（重复应用不再产生重复 pending 项），scanOnce 去重条件扩为 pending 或 ingested 同路径均跳过；④ 随手收敛：去掉多余的 `'pending' as InboxStatus` 断言与 InboxStatus 导入、repos.existsWithId 上方加"table 仅限字面量"防注入注释、inbox.test.ts 删除未用导入。测试相应增加"重复应用含 mediaRefs 的 bundle 不产生重复 pending 项"回归用例（inbox 6 个，全套 40 个）。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -1798,7 +1800,7 @@ git commit -m "feat(desktop): idempotent ingest with atomic sealing, read-only o
   - `scanOnce(db, dirs: InboxDirs): Promise<ScanSummary>`——扫描 inbox 根目录（非递归）：
     1. `^\..+\.icloud$` → iCloud 占位文件，跳过计数（等它变成本体再扫）
     2. size 0 → macOS 14+ dataless 文件，跳过计数
-    3. 已有同 `sourcePath` 且 status=pending 的 InboxItem → 跳过（等待人工确认）
+    3. 已有同 `sourcePath` 且 status=pending（待人工确认）或 ingested（重复投放）的 InboxItem → 跳过
     4. `*.ofbundle.json` → `decodeBundle` 成功 → 事务应用 bundle（实体 insertIfAbsent；mediaRefs 逐条生成 pending InboxItem，`sourcePath = bundle:<bundleId>:<filename>`，`sha256` 预填 mediaRef 值）→ bundle 文件自身记 `ingested`；失败 → 移入 `quarantine/` 并记 `quarantined`
     5. 其余文件 → pending InboxItem（`suggestedEventId` = mtime 同日且存在的第一个 FieldEvent）
   - `applyBundle(db, bundle: Bundle): void`（供 scanOnce 内部与测试直接调用，事务内执行）
@@ -1862,8 +1864,7 @@ Run: `pnpm --filter @openfield/desktop test -- repos` → PASS。
 `apps/desktop/test/inbox.test.ts`:
 ```ts
 import { describe, it, expect, afterAll } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { decodeBundle, encodeBundle, verifyChain, type Bundle } from '@openfield/core';
 import { cleanupTestVault, makeTestVault } from './helpers';
@@ -1967,6 +1968,26 @@ describe('applyBundle', () => {
     expect(() => applyBundle(db, bundle)).not.toThrow();
     expect(listEvidenceEntries(db).length).toBe(chainLen + 1); // 重复应用不入新链目
   });
+
+  it('重复应用含 mediaRefs 的 bundle 不产生重复 pending 项（A10）', () => {
+    const bundle: Bundle = decodeBundle(encodeBundle({
+      schemaVersion: 1,
+      id: 'bundle-3',
+      deviceId: 'iphone-01',
+      createdAt: 1757376600000,
+      events: [],
+      encounters: [],
+      participants: [],
+      consents: [],
+      memos: [],
+      mediaRefs: [{ filename: 'clip.m4a', sha256: 'b'.repeat(64), bytes: 2048, mime: 'audio/mp4', type: 'audio', capturedAt: 1757376600000 }],
+    }));
+    applyBundle(db, bundle);
+    const count = (): number => listInboxItems(db, 'pending').filter((i) => i.sourcePath === 'bundle:bundle-3:clip.m4a').length;
+    expect(count()).toBe(1);
+    applyBundle(db, bundle);
+    expect(count()).toBe(1);
+  });
 });
 ```
 
@@ -1980,14 +2001,14 @@ Expected: FAIL（模块不存在）。
 `apps/desktop/src/main/services/inbox.ts`:
 ```ts
 import type Database from 'better-sqlite3-multiple-ciphers';
-import { computePayloadHash, decodeBundle, type Bundle, type InboxStatus } from '@openfield/core';
+import { computePayloadHash, decodeBundle, type Bundle } from '@openfield/core';
 import { appendEntry } from './evidence';
 import { mkdir, readFile, rename, stat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   getInboxItemBySourcePath, insertConsentRecordIfAbsent, insertEncounterIfAbsent, insertFieldEventIfAbsent,
-  insertInboxItem, insertMemoIfAbsent, insertParticipantIfAbsent, listFieldEvents,
+  insertInboxItem, insertMemoIfAbsent, insertParticipantIfAbsent, listFieldEvents, listInboxItems,
 } from './repos';
 
 export interface InboxDirs {
@@ -2009,19 +2030,22 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
   const actor = `bundle:${bundle.id}`;
   const ts = bundle.createdAt;
   const tx = db.transaction(() => {
+    const seenSourcePaths = new Set(listInboxItems(db).map((i) => i.sourcePath)); // mediaRef 去重：同 bundle 同名文件只生成一条
     for (const e of bundle.events) if (insertFieldEventIfAbsent(db, e)) appendEntry(db, { ts, actor, action: 'CREATE_EVENT', payloadHash: computePayloadHash(e) });
     for (const p of bundle.participants) if (insertParticipantIfAbsent(db, p)) appendEntry(db, { ts, actor, action: 'CREATE_PARTICIPANT', payloadHash: computePayloadHash(p) });
     for (const c of bundle.encounters) if (insertEncounterIfAbsent(db, c)) appendEntry(db, { ts, actor, action: 'CREATE_ENCOUNTER', payloadHash: computePayloadHash(c) });
     for (const c of bundle.consents) if (insertConsentRecordIfAbsent(db, c)) appendEntry(db, { ts, actor, action: 'CONSENT_RECORDED', payloadHash: computePayloadHash(c) });
     for (const m of bundle.memos) if (insertMemoIfAbsent(db, m)) appendEntry(db, { ts, actor, action: 'CREATE_MEMO', payloadHash: computePayloadHash(m) });
     for (const m of bundle.mediaRefs) {
+      const sourcePath = `bundle:${bundle.id}:${m.filename}`;
+      if (seenSourcePaths.has(sourcePath)) continue;
       insertInboxItem(db, {
         id: `inbox-${randomUUID()}`,
-        sourcePath: `bundle:${bundle.id}:${m.filename}`,
+        sourcePath,
         detectedAt: bundle.createdAt,
         sha256: m.sha256,
         suggestedEncounterId: m.encounterId,
-        status: 'pending' as InboxStatus,
+        status: 'pending',
       });
     }
   });
@@ -2050,7 +2074,8 @@ export async function scanOnce(db: Database.Database, dirs: InboxDirs): Promise<
 
   for (const name of names.sort()) {
     const full = join(dirs.inboxDir, name);
-    const st = await stat(full);
+    const st = await stat(full).catch(() => null);
+    if (!st) continue; // 扫描途中文件消失等 stat 失败：跳过，不中断整轮扫描
     if (!st.isFile()) continue;
     if (ICLOUD_STUB.test(name)) {
       summary.skippedIcloud += 1; // iCloud 未下载完的占位文件：等它变成本体
@@ -2060,7 +2085,8 @@ export async function scanOnce(db: Database.Database, dirs: InboxDirs): Promise<
       summary.skippedEmpty += 1; // macOS 14+ dataless 文件大小为 0：不当原始件
       continue;
     }
-    if (getInboxItemBySourcePath(db, full, 'pending')) continue;
+    // 同路径已有 pending（待人工确认）或 ingested（重复投放）记录 → 跳过
+    if (getInboxItemBySourcePath(db, full, 'pending') || getInboxItemBySourcePath(db, full, 'ingested')) continue;
 
     if (name.endsWith('.ofbundle.json')) {
       try {
@@ -2068,12 +2094,17 @@ export async function scanOnce(db: Database.Database, dirs: InboxDirs): Promise<
         applyBundle(db, bundle);
         insertInboxItem(db, { id: `inbox-${randomUUID()}`, sourcePath: full, detectedAt: Date.now(), status: 'ingested' });
         summary.appliedBundles += 1;
-      } catch {
-        await mkdir(dirs.quarantineDir, { recursive: true });
-        const dest = join(dirs.quarantineDir, name);
-        await rename(full, dest);
-        insertInboxItem(db, { id: `inbox-${randomUUID()}`, sourcePath: dest, detectedAt: Date.now(), status: 'quarantined' });
-        summary.quarantined += 1;
+      } catch (err) {
+        console.warn('[inbox] bundle 处理失败，移入隔离区：', name, err);
+        try {
+          await mkdir(dirs.quarantineDir, { recursive: true });
+          const dest = join(dirs.quarantineDir, `${randomUUID().slice(0, 8)}-${name}`); // 随机前缀防同名覆盖
+          await rename(full, dest);
+          insertInboxItem(db, { id: `inbox-${randomUUID()}`, sourcePath: dest, detectedAt: Date.now(), status: 'quarantined' });
+          summary.quarantined += 1;
+        } catch (moveErr) {
+          console.warn('[inbox] 隔离区移动失败，跳过该文件：', name, moveErr);
+        }
       }
       continue;
     }
@@ -2094,7 +2125,7 @@ export async function scanOnce(db: Database.Database, dirs: InboxDirs): Promise<
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `pnpm --filter @openfield/desktop test -- inbox && pnpm --filter @openfield/desktop test -- repos`
-Expected: PASS（inbox 5 个 + repos 7 个）。
+Expected: PASS（inbox 6 个 + repos 7 个，全套 40 个）。
 
 - [ ] **Step 6: Commit**
 
