@@ -197,6 +197,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A13 — Task 10 测试夹具与仓储现实对齐（执行期发现，2026-09-11）：** repos 仓储对 participants 的写入原语是 `upsertParticipant`（并无 `insertParticipant`），Task 10 测试的导入与两处调用相应改为 `upsertParticipant`，Interfaces 消费清单同步修正；ConsentRecord 的 `withdrawnAt` 因 `z.infer` 输出类型必填（zod `.default(null)` 仅在运行时兜底），测试字面量补 `withdrawnAt: null` 以过 typecheck。运行行为均无变化。
 
+**A14 — purge 删除目标路径围栏（Task 10 质量评审 CHANGES_REQUIRED，2026-09-11）：** `join(originalsRoot, a.id)` 的 `a.id` 来自 DB（`Id` 仅 `min(1)` 约束），id 含 `..` 等时可越出 originalsRoot，配合 `rmSync(recursive, force)` 构成应用内最强破坏原语（Task 12 IPC 是下一个接入点）。修正：删除循环在触盘前用 `relative` 词法围栏校验（空串 / `..` 开头 / 绝对路径 → 抛 `artifact 目录越界，拒绝删除：<id>`），并把测试字面量补 `withdrawnAt: null` 等夹具修正一并落正文。正文已就地更新；测试增加"artifact id 越界 → 拒绝删除且波及目录与登记行原样"用例，purge 4 个，全套 50 个。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -2382,15 +2384,15 @@ git commit -m "feat(desktop): verify service replaying chain, rehashing original
 `apps/desktop/test/purge.test.ts`:
 ```ts
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { computePayloadHash, Encounter, FieldEvent, Participant, verifyChain } from '@openfield/core';
+import { Artifact, computePayloadHash, Encounter, FieldEvent, Participant, verifyChain } from '@openfield/core';
 import { cleanupTestVault, makeTestVault } from './helpers';
 import { ingestFile } from '../src/main/services/ingest';
 import { listEvidenceEntries } from '../src/main/services/evidence';
 import {
-  getArtifact, getEncounter, getParticipant, getRealName, insertConsentRecord, insertEncounter,
+  getArtifact, getEncounter, getParticipant, getRealName, insertArtifact, insertConsentRecord, insertEncounter,
   insertFieldEvent, insertMemo, listMemos, setRealName, upsertParticipant,
 } from '../src/main/services/repos';
 import { purgeSubject } from '../src/main/services/purge';
@@ -2445,6 +2447,15 @@ describe('purgeSubject', () => {
     expect(last?.payloadHash).toBe(computePayloadHash({ pseudonym: 'P01', encounters: 1, consents: 1, artifacts: 1, memos: 1 }));
     expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
   });
+
+  it('artifact id 越界（path traversal）→ 拒绝删除，波及目录与登记行原样（A14）', () => {
+    insertArtifact(db, Artifact.parse({ id: '../innocent', encounterId: 'enc-2', type: 'audio', sha256: 'c'.repeat(64), size: 8, mime: 'audio/wav', capturedAt: 1757376400000, deviceId: 'desktop' }), '/nowhere');
+    mkdirSync(join(home, 'innocent'), { recursive: true });
+    writeFileSync(join(home, 'innocent', 'keep.txt'), 'keep');
+    expect(() => purgeSubject(db, paths.originalsRoot, { pseudonym: 'P02', confirmToken: 'P02', actor: 'desktop', ts: 1757462500000 })).toThrow(/越界/);
+    expect(existsSync(join(home, 'innocent', 'keep.txt'))).toBe(true);
+    expect(getEncounter(db, 'enc-2')).toBeTruthy(); // 事务未执行，登记行未删
+  });
 });
 ```
 
@@ -2460,7 +2471,7 @@ Expected: FAIL（模块不存在）。
 import type Database from 'better-sqlite3-multiple-ciphers';
 import { computePayloadHash } from '@openfield/core';
 import { chmodSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { appendEntry } from './evidence';
 import { listArtifactsByEncounter, listConsentsByEncounter, listMemos } from './repos';
 
@@ -2499,6 +2510,10 @@ export function purgeSubject(
   // 先删文件再删库：若 DB 事务失败，隐私已消失、登记残留会被 verify 以 original-missing 可见报告
   for (const a of artifacts) {
     const dir = join(originalsRoot, a.id);
+    const rel = relative(originalsRoot, dir);
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+      throw new Error(`artifact 目录越界，拒绝删除：${a.id}`); // A14：id 来自 DB，不得借路径穿越删到 originalsRoot 之外
+    }
     try {
       for (const f of readdirSync(dir)) chmodSync(join(dir, f), 0o644); // A12：封存件 0444，先恢复可写（Windows 只读位阻止删除；POSIX 无害）
     } catch {
@@ -2525,7 +2540,7 @@ export function purgeSubject(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `pnpm --filter @openfield/desktop test -- purge`
-Expected: PASS（3 个测试）。
+Expected: PASS（4 个测试，全套 50 个）。
 
 - [ ] **Step 5: Commit**
 
