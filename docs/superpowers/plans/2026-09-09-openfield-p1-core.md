@@ -997,6 +997,16 @@ describe('parseRefId', () => {
     const id = makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 42, offsetSeconds: 61 });
     expect(parseRefId(id)).toEqual({ date: '2026-09-09', cityCode: 'KMG', seq: 42, offsetSeconds: 61 });
   });
+  it('偏移 3600s → #T60:00 往返', () => {
+    const id = makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 7, offsetSeconds: 3600 });
+    expect(id).toBe('OF-20260909-KMG-007#T60:00');
+    expect(parseRefId(id).offsetSeconds).toBe(3600);
+  });
+  it('偏移 5999s → #T99:59 往返', () => {
+    const id = makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 7, offsetSeconds: 5999 });
+    expect(id).toBe('OF-20260909-KMG-007#T99:59');
+    expect(parseRefId(id).offsetSeconds).toBe(5999);
+  });
   it('垃圾输入 → 抛错', () => {
     expect(() => parseRefId('OF-2026-KMG-1')).toThrow(/无法解析/);
   });
@@ -1055,7 +1065,7 @@ export function parseRefId(refId: string): ParsedRefId {
   if (m[6] !== undefined) {
     const minutes = Number.parseInt(m[6], 10);
     const seconds = Number.parseInt(m[7] ?? '0', 10);
-    if (minutes > 59 || seconds > 59) throw new Error(`无法解析引用 ID：${refId}`);
+    if (minutes > 99 || seconds > 59) throw new Error(`无法解析引用 ID：${refId}`);
     return {
       date: `${m[1]}-${m[2]}-${m[3]}`,
       cityCode: m[4],
@@ -1075,7 +1085,7 @@ export function parseRefId(refId: string): ParsedRefId {
 - [ ] **Step 4: 运行确认通过**
 
 Run: `cd packages/core && pnpm vitest run test/refid.test.ts`
-Expected: 全部 PASS（13 tests）
+Expected: 全部 PASS（15 tests）
 
 - [ ] **Step 5: Commit**
 
@@ -1169,3 +1179,4 @@ git commit -m "feat(core): public exports and cross-module integration test"
   - 原 Step 4 预期「14 tests」为估算偏差（`it.each` 展开 4 例，实际 17）；追加后为 26。上方代码块已同步为最终状态。
   - Task 5（执行时）：`MediaRef` 的 `sha256`/`capturedAt` 改为引用 Task 2 加固后导出的 `Sha256`/`EpochMs`，不再内联重写同一哈希规则（即 Task 2 评审「导出以供 Task 5 引用」的落地）。上方 Task 5 代码块已同步。
   - Task 5（质量评审后追加）：`BundleV1` 由 `z.object` 改为 `z.strictObject`——bundle 是证据传输格式，未知顶层键静默剥离会把「不完整证据当完整证据」摄入；前向兼容由 `schemaVersion: z.literal(1)` 版本门槛负责，不需要 strip-mode。新增「拒绝未知顶层字段」测试。嵌套实体的 strip 行为保留（Task 2 评审已记录该取舍），Plan 2/3 协调前不再收紧。上方代码块已同步。
+  - Task 6（规格评审发现的计划内缺陷）：`#T` 是 MM:SS（分钟可为 00–99，上限 #T99:59 = 5999s），但 `parseRefId` 原守卫 `minutes > 59` 会拒绝 make 侧合法产出的 60–99 分钟，往返在偏移 ≥3600s 时断裂。守卫改为 `minutes > 99 || seconds > 59`（分钟两位数字已被正则限定 ≤99，99 分支为防御性冗余）。新增 3600s / 5999s 往返测试。上方代码块已同步。
