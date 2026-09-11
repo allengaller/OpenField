@@ -187,6 +187,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A8 — @hapi/sntp 类型声明（执行期发现，2026-09-11）：** @hapi/sntp@4 不自带 TS 声明，Task 5 按正文实现会 TS7016（与 A6 同类问题）。修正：Task 5 额外新增 `apps/desktop/src/types/hapi__sntp.d.ts`（ambient `declare module '@hapi/sntp'`，仅声明 `offset(options?: { host?: string; port?: number; timeout?: number }): Promise<number>`）；Task 5 文件清单相应为 3 个文件。选择 ambient 声明而非引入 `@types/hapi__sntp` 依赖，避免 Task 5 触碰 package.json / pnpm-lock.yaml。
 
+**A9 — Task 8 正文与 A4 对齐 + 建议事件日期修偏（执行期发现，2026-09-11）：** ① Task 8 Step 4 的 `applyBundle` 原为不入链旧版，已就地替换为 A4 修订版（逐实体 IfAbsent 新插入时入链，actor `bundle:<id>`、ts `bundle.createdAt`），inbox.ts 导入相应补 `computePayloadHash` 与 `appendEntry`；测试相应断言 bundle 实体链目齐备、verifyChain ok、重复应用链长不变。② scanOnce 建议事件用例原把事件日期硬编码为 '2026-09-09'，但建议匹配依赖文件 mtime 的本地日期（运行日即"今天"），任何其他日期运行必失败；修正为测试内 `localDateStr(Date.now())` 动态生成事件日期。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -1863,13 +1865,20 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { decodeBundle, encodeBundle, type Bundle } from '@openfield/core';
+import { decodeBundle, encodeBundle, verifyChain, type Bundle } from '@openfield/core';
 import { cleanupTestVault, makeTestVault } from './helpers';
+import { listEvidenceEntries } from '../src/main/services/evidence';
 import { insertFieldEvent, listInboxItems } from '../src/main/services/repos';
 import { applyBundle, scanOnce } from '../src/main/services/inbox';
 
 const { db, paths, home } = makeTestVault();
 afterAll(() => cleanupTestVault(home));
+
+function localDateStr(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
 function writeInbox(name: string, content: string | Buffer): string {
   const p = join(paths.inboxDir, name);
@@ -1879,7 +1888,7 @@ function writeInbox(name: string, content: string | Buffer): string {
 
 describe('scanOnce', () => {
   it('普通文件 → pending 且带同日事件建议；.icloud 与 0 字节跳过', async () => {
-    insertFieldEvent(db, { id: 'evt-scan', date: '2026-09-09', cityCode: 'KMG', locationName: '昆明' });
+    insertFieldEvent(db, { id: 'evt-scan', date: localDateStr(Date.now()), cityCode: 'KMG', locationName: '昆明' }); // A9：事件日期须等于文件 mtime 的本地日期
     const wav = writeInbox('rec.wav', Buffer.from('E'.repeat(64)));
     writeInbox('.rec2.wav.icloud', Buffer.from('rec2.wav\u0000'));
     writeInbox('empty.png', Buffer.alloc(0));
@@ -1918,6 +1927,9 @@ describe('scanOnce', () => {
     const p = writeInbox('session.ofbundle.json', encodeBundle(bundle));
     const summary = await scanOnce(db, { inboxDir: paths.inboxDir, quarantineDir: paths.quarantineDir });
     expect(summary.appliedBundles).toBe(1);
+    const entries = listEvidenceEntries(db);
+    expect(entries.filter((x) => x.actor === 'bundle:bundle-1').map((x) => x.action)).toEqual(['CREATE_EVENT', 'CREATE_PARTICIPANT']); // A4
+    expect(verifyChain(entries).ok).toBe(true);
     const items = listInboxItems(db);
     expect(items.find((i) => i.sourcePath === p)?.status).toBe('ingested');
     const media = items.find((i) => i.sourcePath === 'bundle:bundle-1:live.m4a');
@@ -1936,7 +1948,7 @@ describe('scanOnce', () => {
 });
 
 describe('applyBundle', () => {
-  it('重复应用同一 bundle 幂等（id 去重）', () => {
+  it('重复应用同一 bundle 幂等（id 去重，链长不变，A4）', () => {
     const bundle: Bundle = decodeBundle(encodeBundle({
       schemaVersion: 1,
       id: 'bundle-2',
@@ -1949,8 +1961,11 @@ describe('applyBundle', () => {
       memos: [],
       mediaRefs: [],
     }));
+    const chainLen = listEvidenceEntries(db).length;
     applyBundle(db, bundle);
+    expect(listEvidenceEntries(db).length).toBe(chainLen + 1); // 首次：1 条 CREATE_EVENT
     expect(() => applyBundle(db, bundle)).not.toThrow();
+    expect(listEvidenceEntries(db).length).toBe(chainLen + 1); // 重复应用不入新链目
   });
 });
 ```
@@ -1965,7 +1980,8 @@ Expected: FAIL（模块不存在）。
 `apps/desktop/src/main/services/inbox.ts`:
 ```ts
 import type Database from 'better-sqlite3-multiple-ciphers';
-import { decodeBundle, type Bundle, type InboxStatus } from '@openfield/core';
+import { computePayloadHash, decodeBundle, type Bundle, type InboxStatus } from '@openfield/core';
+import { appendEntry } from './evidence';
 import { mkdir, readFile, rename, stat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -1990,12 +2006,14 @@ export interface ScanSummary {
 const ICLOUD_STUB = /^\..+\.icloud$/;
 
 export function applyBundle(db: Database.Database, bundle: Bundle): void {
+  const actor = `bundle:${bundle.id}`;
+  const ts = bundle.createdAt;
   const tx = db.transaction(() => {
-    for (const e of bundle.events) insertFieldEventIfAbsent(db, e);
-    for (const p of bundle.participants) insertParticipantIfAbsent(db, p);
-    for (const c of bundle.encounters) insertEncounterIfAbsent(db, c);
-    for (const c of bundle.consents) insertConsentRecordIfAbsent(db, c);
-    for (const m of bundle.memos) insertMemoIfAbsent(db, m);
+    for (const e of bundle.events) if (insertFieldEventIfAbsent(db, e)) appendEntry(db, { ts, actor, action: 'CREATE_EVENT', payloadHash: computePayloadHash(e) });
+    for (const p of bundle.participants) if (insertParticipantIfAbsent(db, p)) appendEntry(db, { ts, actor, action: 'CREATE_PARTICIPANT', payloadHash: computePayloadHash(p) });
+    for (const c of bundle.encounters) if (insertEncounterIfAbsent(db, c)) appendEntry(db, { ts, actor, action: 'CREATE_ENCOUNTER', payloadHash: computePayloadHash(c) });
+    for (const c of bundle.consents) if (insertConsentRecordIfAbsent(db, c)) appendEntry(db, { ts, actor, action: 'CONSENT_RECORDED', payloadHash: computePayloadHash(c) });
+    for (const m of bundle.memos) if (insertMemoIfAbsent(db, m)) appendEntry(db, { ts, actor, action: 'CREATE_MEMO', payloadHash: computePayloadHash(m) });
     for (const m of bundle.mediaRefs) {
       insertInboxItem(db, {
         id: `inbox-${randomUUID()}`,
