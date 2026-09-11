@@ -207,6 +207,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A18 — Playwright testMatch 与 #report 断言空格（Task 13 执行期发现，2026-09-12）：** ① Playwright 1.63 默认 `testMatch` 为 `**/*.@(spec|test).?(c|m)[jt]s?(x)`，不匹配计划指定的 `smoke.e2e.ts` 文件名——配置与文件名互相矛盾，运行即 "No tests found"。修正：config 增 `testMatch: '**/*.e2e.ts'`。② `#report` 由 renderer 以 `JSON.stringify(report, null, 2)` 渲染（Task 12 正文即如此），冒烟断言 `"chainOk":true`/`"issues":[]` 永不匹配。修正：改为 `"chainOk": true`/`"issues": []`。其余与正文逐字一致；E2E `1 passed`，全量回归 core 126 + desktop 64。
 
+**A19 — E2E 登记正向断言 + test-results 忽略（Task 13 质量评审 CHANGES_REQUIRED，2026-09-12）：** ① Playwright 每次运行（含全绿）都会写 `apps/desktop/test-results/.last-run.json`，仓库 .gitignore 未覆盖，e2e 一跑 git status 即脏。修正：.gitignore 增 `apps/desktop/test-results/`（紧邻既有 `apps/desktop/out/`），Task 13 文件清单与提交步骤相应纳入 .gitignore。② 冒烟链路在事件/访谈登记后直接进入扫描，无正向断言——若 renderer 登记分支回归（按钮处理静默失败），首错要到 4 步之后的 `"pending":1` 才浮出，定位成本高。修正：`#btn-event` 点击后断言 `#status` 含 `事件已登记`，`#btn-encounter` 点击后断言含 `访谈已登记`（两文案为 renderer main.ts 实际写入）。正文 Step 1 已就地更新。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -3446,6 +3448,7 @@ git commit -m "feat(desktop): electron shell with typed ipc handlers, inbox watc
 
 **Files:**
 - Create: `apps/desktop/playwright.config.ts`, `apps/desktop/e2e/smoke.e2e.ts`
+- Modify: `.gitignore`（A19：新增 `apps/desktop/test-results/`）
 
 **Interfaces:**
 - Consumes: Task 12 构建出的 `out/main/index.js`（`--openfield-home=` 指向临时 home）；`@playwright/test` 的 `_electron.launch`
@@ -3495,12 +3498,14 @@ test('P1 冒烟：建库 → 登记 → 扫描 → 确认 → 校验 → 引用'
     await win.fill('#ev-city', 'KMG');
     await win.fill('#ev-loc', '昆明篆新市场');
     await win.click('#btn-event');
+    await expect(win.locator('#status')).toContainText('事件已登记'); // A19：登记分支正向断言
 
     await win.fill('#enc-id', 'enc-1');
     await win.fill('#enc-event', 'evt-1');
     await win.fill('#enc-participant', 'P01');
     await win.fill('#enc-reason', '目的性抽样');
     await win.click('#btn-encounter');
+    await expect(win.locator('#status')).toContainText('访谈已登记');
 
     mkdirSync(join(home, 'inbox'), { recursive: true });
     writeFileSync(join(home, 'inbox', 'interview.wav'), Buffer.from('e2e-fixture-bytes-000000'));
@@ -3538,7 +3543,7 @@ Expected: core + desktop 全部 typecheck 通过；全部 vitest 通过（Task 1
 - [ ] **Step 4: Commit**
 
 ```bash
-git add apps/desktop/playwright.config.ts apps/desktop/e2e
+git add .gitignore apps/desktop/playwright.config.ts apps/desktop/e2e
 git commit -m "test(desktop): playwright electron smoke covering vault-to-citation flow"
 ```
 
