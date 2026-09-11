@@ -26,12 +26,14 @@ test('P1 冒烟：建库 → 登记 → 扫描 → 确认 → 校验 → 引用'
     await win.fill('#ev-city', 'KMG');
     await win.fill('#ev-loc', '昆明篆新市场');
     await win.click('#btn-event');
+    await expect(win.locator('#status')).toContainText('事件已登记'); // A19：登记分支正向断言
 
     await win.fill('#enc-id', 'enc-1');
     await win.fill('#enc-event', 'evt-1');
     await win.fill('#enc-participant', 'P01');
     await win.fill('#enc-reason', '目的性抽样');
     await win.click('#btn-encounter');
+    await expect(win.locator('#status')).toContainText('访谈已登记');
 
     mkdirSync(join(home, 'inbox'), { recursive: true });
     writeFileSync(join(home, 'inbox', 'interview.wav'), Buffer.from('e2e-fixture-bytes-000000'));
