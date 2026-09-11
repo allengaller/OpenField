@@ -306,3 +306,44 @@ export function insertTimeSyncRecord(db: Database.Database, r: TimeSyncRecord): 
   const v = TimeSyncRecord.parse(r);
   db.prepare('INSERT INTO time_sync_records (id, checked_at, ntp_server, offset_ms) VALUES (?, ?, ?, ?)').run(v.id, v.checkedAt, v.ntpServer, v.offsetMs);
 }
+
+// ---------- IfAbsent（bundle 应用等幂等场景用：返回是否新插入） ----------
+
+function existsWithId(db: Database.Database, table: string, id: string): boolean {
+  return !!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id);
+}
+
+export function insertFieldEventIfAbsent(db: Database.Database, e: FieldEvent): boolean {
+  const v = FieldEvent.parse(e);
+  if (existsWithId(db, 'field_events', v.id)) return false;
+  insertFieldEvent(db, v);
+  return true;
+}
+
+export function insertEncounterIfAbsent(db: Database.Database, e: Encounter): boolean {
+  const v = Encounter.parse(e);
+  if (existsWithId(db, 'encounters', v.id)) return false;
+  insertEncounter(db, v);
+  return true;
+}
+
+export function insertParticipantIfAbsent(db: Database.Database, p: Participant): boolean {
+  const v = Participant.parse(p);
+  if (db.prepare('SELECT 1 FROM participants WHERE pseudonym = ?').get(v.pseudonym)) return false;
+  upsertParticipant(db, v);
+  return true;
+}
+
+export function insertConsentRecordIfAbsent(db: Database.Database, c: ConsentRecord): boolean {
+  const v = ConsentRecord.parse(c);
+  if (existsWithId(db, 'consent_records', v.id)) return false;
+  insertConsentRecord(db, v);
+  return true;
+}
+
+export function insertMemoIfAbsent(db: Database.Database, m: Memo): boolean {
+  const v = Memo.parse(m);
+  if (existsWithId(db, 'memos', v.id)) return false;
+  insertMemo(db, v);
+  return true;
+}

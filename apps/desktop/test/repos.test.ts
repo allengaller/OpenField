@@ -3,7 +3,7 @@ import { Artifact, FieldEvent, InboxItem, Participant } from '@openfield/core';
 import { cleanupTestVault, makeTestVault } from './helpers';
 import {
   getArtifact, getArtifactBySha256, getFieldEvent, getInboxItemBySourcePath, getParticipant,
-  getRealName, insertArtifact, insertFieldEvent, insertInboxItem, setRealName, upsertParticipant,
+  getRealName, insertArtifact, insertFieldEvent, insertFieldEventIfAbsent, insertInboxItem, setRealName, upsertParticipant,
 } from '../src/main/services/repos';
 
 const { db, home } = makeTestVault();
@@ -50,5 +50,11 @@ describe('repos', () => {
     insertInboxItem(db, item);
     expect(getInboxItemBySourcePath(db, '/tmp/inbox/a.wav', 'pending')?.id).toBe('inb-1');
     expect(getInboxItemBySourcePath(db, '/tmp/inbox/a.wav', 'ingested')).toBeNull();
+  });
+
+  it('insertXxxIfAbsent：首插返回 true，重复返回 false', () => {
+    const e = FieldEvent.parse({ id: 'evt-ifabs', date: '2026-09-10', cityCode: 'KMG', locationName: '测试' });
+    expect(insertFieldEventIfAbsent(db, e)).toBe(true);
+    expect(insertFieldEventIfAbsent(db, e)).toBe(false);
   });
 });
