@@ -203,6 +203,8 @@ export function applyBundle(db: Database.Database, bundle: Bundle): void {
 
 **A16 — watcher 冷启动失效 + 测试竞态 + renderer 错误不可见（Task 12 质量评审 CHANGES_REQUIRED，2026-09-12）：** ① 首次启动（解锁前）inboxDir 尚不存在，chokidar 对不存在目录的 watch 永不生效（ENOENT 被内部吞掉）且不报错——onboarding 当次会话的自动扫描与 `inbox:changed` 推送全程失效。修正：`startInboxWatcher` 入口先 `mkdirSync(state.paths.inboxDir, { recursive: true })`；新增"inbox 目录不存在时启动 watcher 仍能自动扫描"回归用例。② watcher 测试在 `startInboxWatcher` 返回后 0ms 写文件，落进 chokidar 异步武装窗口，被初始扫描当已有文件吞掉（`ignoreInitial` 压制 add），仅靠迟到的 change 事件偶发补救——实测全套 5 跑 2 挂。修正：写入前 `await 50ms` 让武装完成，外层超时 5s → 10s。③ renderer 全部 click 处理器 `await invoke` 无 catch，口令错误/重复 ID/确认失败等操作员最常见错误全部表现为静默无反应 + unhandled rejection。修正：`invoke` 在 ok:false 时把错误写入 `#status` 再抛出；模块底部挂 `unhandledrejection` 监听兜底。shell 7 个，全套 64 个。
 
+**A17 — E2E 入口路径 ESM 化（Task 13 执行期发现，2026-09-12）：** apps/desktop 为 `"type": "module"`，Playwright 1.63 对该包下的 `.ts` 测试按 ESM 加载，`__dirname` 未定义——而 `@types/node` 的全局声明使 tsc 不报错，属"类型通过、运行时崩"陷阱。修正：`smoke.e2e.ts` 以 `const here = dirname(fileURLToPath(import.meta.url))` 解析 `../out/main/index.js`，弃用 `__dirname`。
+
 ### Task 1: 桌面应用脚手架（与已落地脚手架合并）
 
 > apps/desktop 已存在：`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/`、`vitest.config.ts` 保持不动；本任务只做钉版对齐 + 依赖补齐 + 共享类型 + 测试重写。
@@ -3465,14 +3467,17 @@ export default defineConfig({
 import { expect, test, _electron } from '@playwright/test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 // electron 包在 Node 环境下 default export 即可执行文件路径；类型层面按 string 用
 import electronPath from 'electron';
+
+const here = dirname(fileURLToPath(import.meta.url)); // A17：包为 type:module，Playwright 按 ESM 加载，无 __dirname
 
 test('P1 冒烟：建库 → 登记 → 扫描 → 确认 → 校验 → 引用', async () => {
   const home = mkdtempSync(join(tmpdir(), 'of-e2e-'));
   const electronApp = await _electron.launch({
-    args: [join(__dirname, '../out/main/index.js'), `--openfield-home=${home}`],
+    args: [join(here, '../out/main/index.js'), `--openfield-home=${home}`],
     executablePath: electronPath as unknown as string,
   });
   const win = await electronApp.firstWindow();
