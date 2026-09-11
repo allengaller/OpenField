@@ -38,7 +38,10 @@ export type CityCode = z.infer<typeof CityCode>;
 export const Sha256 = z.string().regex(/^[0-9a-f]{64}$/);
 export const IsoDate = z.iso.date();
 export const EpochMs = z.number().int().positive();
-const Id = z.string().min(1);
+// 证据链 actor：非空、≤128 字符、不含 '|' 或换行符。
+// '|' 是 entryHash 前像的字段分隔符，actor 一旦含 '|' 即产生编码歧义。
+export const Actor = z.string().min(1).max(128).regex(/^[^|\r\n]*$/);
+export const Id = z.string().min(1);
 
 // ---------- README 六实体 ----------
 export const FieldEvent = z.object({
@@ -133,7 +136,7 @@ export type TimeSyncRecord = z.infer<typeof TimeSyncRecord>;
 export const EvidenceEntry = z.object({
   seq: z.number().int().nonnegative(),
   ts: EpochMs,
-  actor: z.string().min(1),
+  actor: Actor,
   action: EvidenceAction,
   payloadHash: Sha256,
   prevHash: Sha256,

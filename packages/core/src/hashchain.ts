@@ -1,4 +1,4 @@
-import type { EvidenceEntry, EvidenceAction } from './entities';
+import { EvidenceEntry, EvidenceAction, Actor, EpochMs, Sha256 } from './entities';
 import { sha256Hex } from './canonical';
 
 export const GENESIS_PREV_HASH = '0'.repeat(64);
@@ -10,6 +10,9 @@ export interface EntryInput {
   payloadHash: string;
 }
 
+// '|' 连接编码的无歧义前提：payloadHash 为 64 位小写 hex、action 为受控枚举、
+// actor 不含 '|'（createEntry 用 Actor schema 强制）。任一前提失效，
+// 不同字段组合可能产生相同哈希前像。
 export function computeEntryHash(
   e: Pick<EvidenceEntry, 'seq' | 'prevHash' | 'ts' | 'actor' | 'action' | 'payloadHash'>,
 ): string {
@@ -19,10 +22,10 @@ export function computeEntryHash(
 export function createEntry(prev: EvidenceEntry | null, input: EntryInput): EvidenceEntry {
   const candidate = {
     seq: prev ? prev.seq + 1 : 0,
-    ts: input.ts,
-    actor: input.actor,
-    action: input.action,
-    payloadHash: input.payloadHash,
+    ts: EpochMs.parse(input.ts),
+    actor: Actor.parse(input.actor),
+    action: EvidenceAction.parse(input.action),
+    payloadHash: Sha256.parse(input.payloadHash),
     prevHash: prev ? prev.entryHash : GENESIS_PREV_HASH,
   };
   return { ...candidate, entryHash: computeEntryHash(candidate) };
@@ -33,6 +36,13 @@ export type ChainVerifyResult = { ok: true } | { ok: false; brokenAt: number; re
 export function verifyChain(entries: EvidenceEntry[]): ChainVerifyResult {
   let prev: EvidenceEntry | null = null;
   for (const e of entries) {
+    if (!EvidenceEntry.safeParse(e).success) {
+      return {
+        ok: false,
+        brokenAt: typeof e?.seq === 'number' ? e.seq : -1,
+        reason: '条目不符合 EvidenceEntry schema',
+      };
+    }
     if (e.seq !== (prev ? prev.seq + 1 : 0)) {
       return { ok: false, brokenAt: e.seq, reason: 'seq 不连续' };
     }

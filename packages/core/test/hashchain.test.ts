@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { computePayloadHash } from '../src/canonical';
 import { GENESIS_PREV_HASH, computeEntryHash, createEntry, verifyChain } from '../src/hashchain';
-import type { EvidenceEntry } from '../src/entities';
+import type { EvidenceAction, EvidenceEntry } from '../src/entities';
 
 function buildChain(n: number): EvidenceEntry[] {
   const out: EvidenceEntry[] = [];
@@ -34,6 +34,52 @@ describe('createEntry', () => {
     const chain = buildChain(2);
     expect(chain[1]!.seq).toBe(1);
     expect(chain[1]!.prevHash).toBe(chain[0]!.entryHash);
+  });
+});
+
+describe('createEntry 输入校验', () => {
+  it('拒绝前像碰撞样例 payloadHash（终审发现）', () => {
+    // 'EXPORT|' + 57×a 恰 64 字符但非小写 hex 且含 '|'。若无 Sha256 校验，
+    // (actor='u', action='CREATE_EVENT', payloadHash='EXPORT|X') 与
+    // (actor='u|CREATE_EVENT', action='EXPORT', payloadHash='X') 产生相同 '|' 前像。
+    expect(() =>
+      createEntry(null, {
+        ts: 1757376000000,
+        actor: 'u',
+        action: 'CREATE_EVENT',
+        payloadHash: 'EXPORT|' + 'a'.repeat(57),
+      }),
+    ).toThrow();
+  });
+  it.each([0, -1, 1.5])('拒绝非法 ts %s', (badTs) => {
+    expect(() =>
+      createEntry(null, {
+        ts: badTs,
+        actor: 'desktop',
+        action: 'INGEST_ARTIFACT',
+        payloadHash: computePayloadHash({ artifactId: 'art-x' }),
+      }),
+    ).toThrow();
+  });
+  it.each(['', 'u|v', 'a'.repeat(129)])('拒绝非法 actor %s', (badActor) => {
+    expect(() =>
+      createEntry(null, {
+        ts: 1757376000000,
+        actor: badActor,
+        action: 'INGEST_ARTIFACT',
+        payloadHash: computePayloadHash({ artifactId: 'art-x' }),
+      }),
+    ).toThrow();
+  });
+  it('拒绝未定义的 action', () => {
+    expect(() =>
+      createEntry(null, {
+        ts: 1757376000000,
+        actor: 'desktop',
+        action: 'NOPE' as EvidenceAction,
+        payloadHash: computePayloadHash({ artifactId: 'art-x' }),
+      }),
+    ).toThrow();
   });
 });
 
@@ -80,5 +126,40 @@ describe('verifyChain', () => {
     const r = verifyChain([forged, chain[1]!]);
     expect(r).toMatchObject({ ok: false, brokenAt: 0 });
     expect(r.ok === false && r.reason).toContain('prevHash');
+  });
+});
+
+describe('verifyChain schema 前置校验', () => {
+  it('schema 破损条目（actor 含 |）→ 报 schema 错而非哈希/结构错', () => {
+    const chain = buildChain(2);
+    // entryHash 与各字段自洽（哈希重算会通过）——证明 schema 检查先于哈希重算
+    const badEntry: EvidenceEntry = {
+      seq: 1,
+      ts: 1757376000001,
+      actor: 'u|v',
+      action: 'INGEST_ARTIFACT',
+      payloadHash: 'a'.repeat(64),
+      prevHash: chain[0]!.entryHash,
+      entryHash: computeEntryHash({
+        seq: 1,
+        ts: 1757376000001,
+        actor: 'u|v',
+        action: 'INGEST_ARTIFACT',
+        payloadHash: 'a'.repeat(64),
+        prevHash: chain[0]!.entryHash,
+      }),
+    };
+    expect(verifyChain([chain[0]!, badEntry])).toEqual({
+      ok: false,
+      brokenAt: 1,
+      reason: '条目不符合 EvidenceEntry schema',
+    });
+  });
+  it('数组中的 null 条目 → brokenAt=-1 而非抛 TypeError', () => {
+    expect(verifyChain([null as unknown as EvidenceEntry])).toEqual({
+      ok: false,
+      brokenAt: -1,
+      reason: '条目不符合 EvidenceEntry schema',
+    });
   });
 });

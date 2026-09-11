@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { BundleV1, BundleValidationError, encodeBundle, decodeBundle } from '../src/bundle';
+import { BundleV1, BundleValidationError, MediaRef, encodeBundle, decodeBundle } from '../src/bundle';
+import type { BundleIssue } from '../src/bundle';
+
+function issuesOf(fn: () => unknown): BundleIssue[] {
+  try {
+    fn();
+  } catch (e) {
+    if (!(e instanceof BundleValidationError)) throw e;
+    return e.issues;
+  }
+  throw new Error('预期抛出 BundleValidationError');
+}
 
 const validBundle = {
   schemaVersion: 1 as const,
@@ -59,5 +70,31 @@ describe('bundle v1', () => {
   it('拒绝未知顶层字段', () => {
     const bad = { ...validBundle, extraField: 'x' };
     expect(() => decodeBundle(JSON.stringify(bad))).toThrow(BundleValidationError);
+  });
+});
+
+describe('bundle 错误面', () => {
+  it('encodeBundle 对非法 bundle（createdAt: 0）抛 BundleValidationError 而非泄漏 ZodError', () => {
+    const bad = { ...BundleV1.parse(validBundle), createdAt: 0 };
+    expect(() => encodeBundle(bad)).toThrow(BundleValidationError);
+  });
+  it('decodeBundle 非 JSON → issues 形状恰为 [{ message: "不是合法 JSON" }]', () => {
+    expect(issuesOf(() => decodeBundle('not json'))).toEqual([{ message: '不是合法 JSON' }]);
+  });
+  it('decodeBundle 未知顶层键 → issue 标识该键（zod 4 顶层未知键无 path，按实际行为断言）', () => {
+    const issues = issuesOf(() => decodeBundle(JSON.stringify({ ...validBundle, surprise: true })));
+    expect(issues[0]).toMatchObject({ code: 'unrecognized_keys' });
+    expect(issues[0]!.message).toContain('surprise');
+  });
+  it('decodeBundle 嵌套字段错误 → issues[0].path 为点连接路径', () => {
+    const bad = { ...validBundle, mediaRefs: [{ ...validBundle.mediaRefs[0]!, sha256: 'nothex' }] };
+    const issues = issuesOf(() => decodeBundle(JSON.stringify(bad)));
+    expect(issues[0]!.path).toBe('mediaRefs.0.sha256');
+  });
+  it('MediaRef 拒绝空串 encounterId', () => {
+    expect(MediaRef.safeParse({ ...validBundle.mediaRefs[0]!, encounterId: '' }).success).toBe(false);
+  });
+  it.each([0, 1.5])('BundleV1 拒绝非法 createdAt %s', (badCreatedAt) => {
+    expect(BundleV1.safeParse({ ...validBundle, createdAt: badCreatedAt }).success).toBe(false);
   });
 });

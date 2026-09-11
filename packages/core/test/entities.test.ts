@@ -86,17 +86,17 @@ describe('Participant 隐私边界', () => {
 });
 
 describe('EvidenceEntry', () => {
+  const validEntry = {
+    seq: 0,
+    ts: 1757376000000,
+    actor: 'desktop',
+    action: 'INGEST_ARTIFACT',
+    payloadHash: 'b'.repeat(64),
+    prevHash: '0'.repeat(64),
+    entryHash: 'c'.repeat(64),
+  };
   it('接受合法链上条目', () => {
-    const e = {
-      seq: 0,
-      ts: 1757376000000,
-      actor: 'desktop',
-      action: 'INGEST_ARTIFACT',
-      payloadHash: 'b'.repeat(64),
-      prevHash: '0'.repeat(64),
-      entryHash: 'c'.repeat(64),
-    };
-    expect(EvidenceEntry.parse(e).action).toBe('INGEST_ARTIFACT');
+    expect(EvidenceEntry.parse(validEntry).action).toBe('INGEST_ARTIFACT');
   });
   it('拒绝未定义的 action', () => {
     const e = {
@@ -104,6 +104,15 @@ describe('EvidenceEntry', () => {
       payloadHash: 'b'.repeat(64), prevHash: '0'.repeat(64), entryHash: 'c'.repeat(64),
     };
     expect(EvidenceEntry.safeParse(e).success).toBe(false);
+  });
+  it.each(['u|v', 'u\nv', 'u\rv'])('拒绝 actor 含管道符或换行符 %s', (badActor) => {
+    expect(EvidenceEntry.safeParse({ ...validEntry, actor: badActor }).success).toBe(false);
+  });
+  it('拒绝 129 字符 actor', () => {
+    expect(EvidenceEntry.safeParse({ ...validEntry, actor: 'a'.repeat(129) }).success).toBe(false);
+  });
+  it('拒绝空串 actor', () => {
+    expect(EvidenceEntry.safeParse({ ...validEntry, actor: '' }).success).toBe(false);
   });
 });
 

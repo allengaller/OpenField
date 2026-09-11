@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { FieldEvent, Encounter, Participant, ConsentRecord, Memo, Gps, Sha256, EpochMs } from './entities';
+import { FieldEvent, Encounter, Participant, ConsentRecord, Memo, Gps, Sha256, EpochMs, Id } from './entities';
 
 export const MediaRef = z.object({
   filename: z.string().min(1),
@@ -9,7 +9,7 @@ export const MediaRef = z.object({
   type: z.enum(['audio', 'photo', 'note', 'doc']),
   capturedAt: EpochMs,
   gps: Gps.optional(),
-  encounterId: z.string().optional(),
+  encounterId: Id.optional(),
 });
 export type MediaRef = z.infer<typeof MediaRef>;
 
@@ -17,7 +17,7 @@ export const BundleV1 = z.strictObject({
   schemaVersion: z.literal(1),
   id: z.string().min(1),
   deviceId: z.string().min(1),
-  createdAt: z.number().int().positive(),
+  createdAt: EpochMs,
   events: z.array(FieldEvent),
   encounters: z.array(Encounter),
   participants: z.array(Participant),
@@ -27,14 +27,30 @@ export const BundleV1 = z.strictObject({
 });
 export type Bundle = z.infer<typeof BundleV1>;
 
+export interface BundleIssue {
+  message: string;
+  path?: string;
+  code?: string;
+}
+
 export class BundleValidationError extends Error {
-  constructor(readonly issues: unknown[]) {
+  constructor(readonly issues: BundleIssue[]) {
     super(`bundle 校验失败：${issues.length} 个问题`);
   }
 }
 
+function toIssues(error: z.ZodError): BundleIssue[] {
+  return error.issues.map((i) => ({
+    message: i.message,
+    ...(i.path.length > 0 ? { path: i.path.join('.') } : {}),
+    code: i.code,
+  }));
+}
+
 export function encodeBundle(bundle: Bundle): string {
-  return JSON.stringify(BundleV1.parse(bundle), null, 2);
+  const parsed = BundleV1.safeParse(bundle);
+  if (!parsed.success) throw new BundleValidationError(toIssues(parsed.error));
+  return JSON.stringify(parsed.data, null, 2);
 }
 
 export function decodeBundle(text: string): Bundle {
@@ -45,6 +61,6 @@ export function decodeBundle(text: string): Bundle {
     throw new BundleValidationError([{ message: '不是合法 JSON' }]);
   }
   const parsed = BundleV1.safeParse(raw);
-  if (!parsed.success) throw new BundleValidationError(parsed.error.issues);
+  if (!parsed.success) throw new BundleValidationError(toIssues(parsed.error));
   return parsed.data;
 }
