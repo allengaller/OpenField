@@ -111,6 +111,9 @@ describe('EvidenceEntry', () => {
   it('拒绝 129 字符 actor', () => {
     expect(EvidenceEntry.safeParse({ ...validEntry, actor: 'a'.repeat(129) }).success).toBe(false);
   });
+  it('接受恰好 128 字符 actor（长度上界恰过）', () => {
+    expect(EvidenceEntry.parse({ ...validEntry, actor: 'x'.repeat(128) }).actor).toHaveLength(128);
+  });
   it('拒绝空串 actor', () => {
     expect(EvidenceEntry.safeParse({ ...validEntry, actor: '' }).success).toBe(false);
   });

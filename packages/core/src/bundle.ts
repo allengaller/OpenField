@@ -30,7 +30,7 @@ export type Bundle = z.infer<typeof BundleV1>;
 export interface BundleIssue {
   message: string;
   path?: string;
-  code?: string;
+  code: string;
 }
 
 export class BundleValidationError extends Error {
@@ -59,7 +59,7 @@ export function decodeBundle(text: string): Bundle {
   try {
     raw = JSON.parse(text);
   } catch {
-    throw new BundleValidationError([{ message: '不是合法 JSON' }]);
+    throw new BundleValidationError([{ message: '不是合法 JSON', code: 'invalid_json' }]);
   }
   const parsed = BundleV1.safeParse(raw);
   if (!parsed.success) throw new BundleValidationError(toIssues(parsed.error));

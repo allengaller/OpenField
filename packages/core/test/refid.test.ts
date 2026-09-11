@@ -45,6 +45,12 @@ describe('makeRefId', () => {
   it('偏移超过 #T99:59 上限 → 抛错', () => {
     expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: 6000 })).toThrow(RefIdError);
   });
+  it('offsetSeconds 非整数 1.5 → 抛 RefIdError（引用 ID 会被印进论文，禁畸形 #T00:01.5）', () => {
+    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: 1.5 })).toThrow(RefIdError);
+  });
+  it('offsetSeconds 非整数 -0.5 → 抛 RefIdError', () => {
+    expect(() => makeRefId({ date: '2026-09-09', cityCode: 'KMG', seq: 1, offsetSeconds: -0.5 })).toThrow(RefIdError);
+  });
 });
 
 describe('parseRefId', () => {

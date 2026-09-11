@@ -19,6 +19,8 @@ export function computeEntryHash(
   return sha256Hex(`${e.seq}|${e.prevHash}|${e.ts}|${e.actor}|${e.action}|${e.payloadHash}`);
 }
 
+// 输入（含 prev）校验失败直接抛 ZodError：链写入口必须响亮失败，不做领域错误包装
+// （bundle 的 BundleValidationError、refid 的 RefIdError 统一策略不适用于此）。
 export function createEntry(prev: EvidenceEntry | null, input: EntryInput): EvidenceEntry {
   const p = prev ? EvidenceEntry.parse(prev) : null;
   const candidate = {

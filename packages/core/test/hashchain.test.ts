@@ -36,6 +36,16 @@ describe('createEntry', () => {
     expect(chain[1]!.seq).toBe(1);
     expect(chain[1]!.prevHash).toBe(chain[0]!.entryHash);
   });
+  it('ts 为 Number.MAX_SAFE_INTEGER → 通过，entryHash 为 64 位小写 hex，单条链校验通过', () => {
+    const e = createEntry(null, {
+      ts: Number.MAX_SAFE_INTEGER,
+      actor: 'desktop',
+      action: 'CREATE_EVENT',
+      payloadHash: 'a'.repeat(64),
+    });
+    expect(e.entryHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(verifyChain([e])).toEqual({ ok: true });
+  });
 });
 
 describe('createEntry 输入校验', () => {

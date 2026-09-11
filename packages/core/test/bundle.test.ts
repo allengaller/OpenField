@@ -78,8 +78,10 @@ describe('bundle 错误面', () => {
     const bad = { ...BundleV1.parse(validBundle), createdAt: 0 };
     expect(() => encodeBundle(bad)).toThrow(BundleValidationError);
   });
-  it('decodeBundle 非 JSON → issues 形状恰为 [{ message: "不是合法 JSON" }]', () => {
-    expect(issuesOf(() => decodeBundle('not json'))).toEqual([{ message: '不是合法 JSON' }]);
+  it('decodeBundle 非 JSON → issues 形状恰为 [{ message: "不是合法 JSON", code: "invalid_json" }]', () => {
+    expect(issuesOf(() => decodeBundle('not json'))).toEqual([
+      { message: '不是合法 JSON', code: 'invalid_json' },
+    ]);
   });
   it('BundleValidationError 实例 name 为类名（Error.name 覆写，不回退到 Error）', () => {
     try {
