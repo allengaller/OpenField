@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CityCode, FieldEvent, Encounter, Artifact, Participant, EvidenceEntry, ConsentRecord,
+  CityCode, FieldEvent, Encounter, Artifact, Participant, EvidenceAction, EvidenceEntry, ConsentRecord,
   Memo, InboxItem, TimeSyncRecord,
 } from '../src/entities';
 
@@ -82,6 +82,16 @@ describe('Participant 隐私边界', () => {
   it('接受合法档案', () => {
     const p = { pseudonym: 'P-001', industry: '菌子批发', referralChain: ['P-002'] };
     expect(Participant.parse(p).referralChain).toEqual(['P-002']);
+  });
+});
+
+describe('EvidenceAction', () => {
+  it('接受新增的 CREATE_PARTICIPANT 与 CREATE_MEMO', () => {
+    expect(EvidenceAction.parse('CREATE_PARTICIPANT')).toBe('CREATE_PARTICIPANT');
+    expect(EvidenceAction.parse('CREATE_MEMO')).toBe('CREATE_MEMO');
+  });
+  it('拒绝未定义的 action', () => {
+    expect(EvidenceAction.safeParse('NOT_AN_ACTION').success).toBe(false);
   });
 });
 
