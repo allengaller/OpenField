@@ -21,6 +21,7 @@ test('P1 冒烟：建库 → 登记 → 扫描 → 确认 → 校验 → 引用'
     await win.click('#btn-create');
     await expect(win.locator('#status')).toContainText('"unlocked":true');
 
+    await win.click('#nav-register');
     await win.fill('#ev-id', 'evt-1');
     await win.fill('#ev-date', '2026-09-11');
     await win.fill('#ev-city', 'KMG');
@@ -35,15 +36,24 @@ test('P1 冒烟：建库 → 登记 → 扫描 → 确认 → 校验 → 引用'
     await win.click('#btn-encounter');
     await expect(win.locator('#status')).toContainText('访谈已登记');
 
+    // 引用门禁：录音材料无有效知情同意不可引用，先记录同意书
+    await win.fill('#consent-enc', 'enc-1');
+    await win.selectOption('#consent-type', 'recording');
+    await win.fill('#consent-scope', '学术研究');
+    await win.click('#btn-consent');
+    await expect(win.locator('#status')).toContainText('同意已记录');
+
     mkdirSync(join(home, 'inbox'), { recursive: true });
     writeFileSync(join(home, 'inbox', 'interview.wav'), Buffer.from('e2e-fixture-bytes-000000'));
 
+    await win.click('#nav-inbox');
     await win.click('#btn-scan');
     await expect(win.locator('#scan')).toContainText('"pending":1');
     await win.fill('#confirm-enc', 'enc-1');
     await win.click('#pending button');
     await expect(win.locator('#pending')).not.toContainText('interview.wav');
 
+    await win.click('#nav-verify');
     await win.click('#btn-verify');
     await expect(win.locator('#report')).toContainText('"chainOk": true');
     await expect(win.locator('#report')).toContainText('"issues": []');

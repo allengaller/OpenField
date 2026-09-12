@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OpenField — 让 AI 扎根于人的真实经验</title>
+<meta name="description" content="OpenField 是一套单人可携带的田野调查操作系统：采集、存证、沉淀、分析、交付，全程离线优先，证据级严谨，伦理即基础设施。MIT 开源。" />
+<style>
+  @font-face { font-family: 'Space Grotesk'; font-style: normal; font-weight: 500; font-display: swap; src: url('./assets/fonts/space-grotesk-latin-500-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Space Grotesk'; font-style: normal; font-weight: 600; font-display: swap; src: url('./assets/fonts/space-grotesk-latin-600-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap; src: url('./assets/fonts/inter-latin-400-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Inter'; font-style: normal; font-weight: 500; font-display: swap; src: url('./assets/fonts/inter-latin-500-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('./assets/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
+
+  :root {
+    --paper: oklch(98.5% 0.004 250);
+    --paper-2: oklch(96.2% 0.006 250);
+    --rule: oklch(91% 0.006 250);
+    --muted: oklch(51% 0.014 255);
+    --ink: oklch(24% 0.02 258);
+    --accent: oklch(58% 0.2 256);
+    --accent-deep: oklch(48% 0.19 258);
+    --accent-soft: oklch(94.5% 0.024 256);
+    --graphite: oklch(22% 0.016 260);
+    --graphite-2: oklch(26% 0.017 260);
+    --graphite-ink: oklch(93% 0.006 250);
+    --graphite-muted: oklch(68% 0.012 254);
+    --success: oklch(56% 0.13 152);
+    --font-display: 'Space Grotesk', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+    --font-body: 'Inter', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { animation: none !important; transition: none !important; } }
+  body { background: var(--paper); color: var(--ink); font-family: var(--font-body); line-height: 1.7; font-size: 16px; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+  section { padding: 72px 0; }
+  h2 { font-family: var(--font-display); font-size: 30px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 12px; }
+  .kicker { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
+  .lede { color: var(--muted); max-width: 640px; margin-bottom: 40px; }
+  a { color: inherit; }
+  code, .mono { font-family: var(--font-mono); }
+
+  /* header */
+  header { position: sticky; top: 0; z-index: 10; background: color-mix(in oklab, var(--paper) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--rule); }
+  .nav { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 600; font-size: 18px; text-decoration: none; }
+  .brand svg { color: var(--accent); }
+  .nav-links { display: flex; gap: 22px; font-size: 14px; }
+  .nav-links a { text-decoration: none; color: var(--muted); }
+  .nav-links a:hover { color: var(--ink); }
+  @media (max-width: 720px) { .nav-links { display: none; } }
+
+  /* hero */
+  .hero { padding: 96px 0 80px; }
+  .hero h1 { font-family: var(--font-display); font-weight: 600; font-size: clamp(40px, 7vw, 64px); line-height: 1.12; letter-spacing: -0.02em; max-width: 820px; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero .tag { font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 20px; }
+  .hero p.sub { font-size: 18px; color: var(--muted); max-width: 660px; margin: 24px 0 36px; }
+  .cta-row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border-radius: 10px; font-weight: 500; font-size: 15px; text-decoration: none; border: 1px solid transparent; transition: background .15s ease, border-color .15s ease; }
+  .btn-primary { background: var(--accent); color: oklch(99% 0.002 250); }
+  .btn-primary:hover { background: var(--accent-deep); }
+  .btn-ghost { border-color: var(--rule); color: var(--ink); background: transparent; }
+  .btn-ghost:hover { border-color: var(--muted); }
+  .status-strip { display: flex; gap: 26px; flex-wrap: wrap; margin-top: 44px; padding-top: 24px; border-top: 1px solid var(--rule); }
+  .status-strip .item { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block; }
+  .dot.half { background: var(--accent); }
+
+  /* roles */
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+  @media (max-width: 900px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px) { .grid-4 { grid-template-columns: 1fr; } }
+  .card { background: #fff; border: 1px solid var(--rule); border-radius: 14px; padding: 22px; }
+  .card h3 { font-family: var(--font-display); font-size: 17px; font-weight: 600; margin: 10px 0 6px; }
+  .card p { font-size: 14px; color: var(--muted); }
+  .card svg { color: var(--accent); }
+  .card .en { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; color: var(--muted); }
+
+  /* layers */
+  .layers { border: 1px solid var(--rule); border-radius: 14px; overflow: hidden; }
+  .layer { display: grid; grid-template-columns: 84px 1fr 150px; align-items: center; gap: 14px; padding: 16px 22px; background: #fff; border-bottom: 1px solid var(--rule); }
+  .layer:last-child { border-bottom: none; }
+  .layer .no { font-family: var(--font-display); font-weight: 600; font-size: 15px; color: var(--accent); }
+  .layer .name { font-weight: 500; }
+  .layer .name span { display: block; font-size: 13px; color: var(--muted); font-weight: 400; }
+  .layer .st { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; justify-self: end; padding: 4px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); }
+  .layer .st.todo { background: var(--paper-2); color: var(--muted); }
+  @media (max-width: 640px) { .layer { grid-template-columns: 56px 1fr; } .layer .st { display: none; } }
+
+  /* capabilities */
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 900px) { .grid-3 { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .grid-3 { grid-template-columns: 1fr; } }
+  .cap { border: 1px solid var(--rule); background: #fff; border-radius: 12px; padding: 16px 18px; }
+  .cap b { display: block; font-size: 14.5px; font-weight: 500; margin-bottom: 4px; }
+  .cap span { font-size: 13px; color: var(--muted); }
+
+  /* evidence (dark beat) */
+  .evidence { background: var(--graphite); color: var(--graphite-ink); }
+  .evidence h2 { color: var(--graphite-ink); }
+  .evidence .kicker { color: var(--graphite-muted); }
+  .evidence .lede { color: var(--graphite-muted); }
+  .ev-grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; }
+  @media (max-width: 860px) { .ev-grid { grid-template-columns: 1fr; } }
+  .ev-box { background: var(--graphite-2); border: 1px solid oklch(32% 0.018 258); border-radius: 14px; padding: 24px; }
+  .ev-box h3 { font-size: 15px; font-weight: 500; margin-bottom: 12px; color: var(--graphite-ink); }
+  .ev-box p { font-size: 14px; color: var(--graphite-muted); margin-top: 12px; }
+  pre { font-family: var(--font-mono); font-size: 13px; line-height: 1.8; color: var(--graphite-ink); overflow-x: auto; }
+  pre .c { color: var(--graphite-muted); }
+  pre .a { color: oklch(78% 0.12 250); }
+  .refid { font-family: var(--font-mono); font-size: clamp(15px, 2.6vw, 20px); background: oklch(30% 0.05 258); border: 1px solid oklch(38% 0.08 256); color: oklch(85% 0.08 250); border-radius: 10px; padding: 14px 18px; display: inline-block; }
+
+  /* principles */
+  .prins { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; counter-reset: p; }
+  @media (max-width: 900px) { .prins { grid-template-columns: 1fr; } }
+  .prin { border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 12px 12px 0; padding: 16px 18px; }
+  .prin b { display: block; font-size: 14.5px; font-weight: 500; margin-bottom: 4px; }
+  .prin span { font-size: 13px; color: var(--muted); }
+
+  /* roadmap */
+  .roads { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 860px) { .roads { grid-template-columns: 1fr; } }
+  .road { background: #fff; border: 1px solid var(--rule); border-radius: 14px; padding: 22px; }
+  .road .tag { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; padding: 3px 10px; border-radius: 999px; display: inline-block; margin-bottom: 12px; }
+  .road .now { background: var(--accent-soft); color: var(--accent-deep); }
+  .road .later { background: var(--paper-2); color: var(--muted); }
+  .road h3 { font-family: var(--font-display); font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+  .road p { font-size: 14px; color: var(--muted); }
+
+  /* docs */
+  .docs-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 40px; }
+  @media (max-width: 640px) { .docs-list { grid-template-columns: 1fr; } }
+  .doc-link { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 14px 4px; border-bottom: 1px solid var(--rule); text-decoration: none; }
+  .doc-link:hover b { color: var(--accent); }
+  .doc-link b { font-weight: 500; font-size: 15px; transition: color .15s ease; }
+  .doc-link span { font-size: 13px; color: var(--muted); text-align: right; }
+  .mono-ext { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+
+  footer { border-top: 1px solid var(--rule); padding: 44px 0 60px; background: var(--paper-2); }
+  footer .quote { font-size: 15px; color: var(--muted); max-width: 560px; margin-bottom: 20px; }
+  footer .meta { font-family: var(--font-mono); font-size: 12px; color: var(--muted); display: flex; gap: 20px; flex-wrap: wrap; }
+  footer a { color: var(--accent-deep); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="#top">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      OpenField
+    </a>
+    <nav class="nav-links">
+      <a href="#roles">产品</a>
+      <a href="#layers">架构</a>
+      <a href="#evidence">证据链</a>
+      <a href="#principles">宪法</a>
+      <a href="#roadmap">路线图</a>
+      <a href="https://github.com/allengaller/open-field">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap">
+      <p class="tag">Grounding AI in Human Reality</p>
+      <h1>让 AI 扎根于<em>人的真实经验</em>。</h1>
+      <p class="sub">OpenField 是一套单人可携带的田野调查操作系统——采集、存证、沉淀、分析、交付，全程离线优先，证据级严谨，伦理即基础设施。走进工厂、村庄、市场与作坊，以证据级的严谨保存人们所说的每一句话。</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/allengaller/open-field">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.78 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.26 5.68.41.36.78 1.06.78 2.14 0 1.54-.01 2.79-.01 3.17 0 .31.21.68.8.56A11.52 11.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg>
+          GitHub 仓库
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/allengaller/open-field/blob/main/PRINCIPLES.md">阅读项目宪法</a>
+      </div>
+      <div class="status-strip">
+        <span class="item"><span class="dot"></span>MIT 开源</span>
+        <span class="item"><span class="dot"></span>桌面端服务层已交付（单测 + E2E）</span>
+        <span class="item"><span class="dot half"></span>P1 进行中 · 移动端与 AI 未接入</span>
+        <span class="item"><span class="dot half"></span>离线优先 · 数据本地加密</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="roles" style="padding-top: 24px;">
+    <div class="wrap">
+      <p class="kicker">01 · 这是什么</p>
+      <h2>不是聊天机器人，不是又一个笔记软件</h2>
+      <p class="lede">OpenField 是研究者的四件套：它存在的意义是产出经得起质疑的研究成果，而不是对话。</p>
+      <div class="grid-4">
+        <div class="card">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg>
+          <span class="en">Capture Terminal</span>
+          <h3>采集终端</h3><p>录音、照片、笔记、文档的多模态入口，断网完整可用。</p>
+        </div>
+        <div class="card">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span class="en">Evidence Vault</span>
+          <h3>证据库</h3><p>哈希链 + 只读封存 + 可信时间，让每份材料经得起质疑。</p>
+        </div>
+        <div class="card">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="en">Field Archive</span>
+          <h3>田野档案</h3><p>人物 × 地点 × 时间 × 主题的知识沉淀，而不只是堆积。</p>
+        </div>
+        <div class="card">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          <span class="en">Methodology Engine</span>
+          <h3>方法论引擎</h3><p>知情同意、匿名化、三角验证被固化为系统能力。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="layers" style="padding-top: 24px;">
+    <div class="wrap">
+      <p class="kicker">02 · 五层架构</p>
+      <h2>从采集到交付的全链路</h2>
+      <p class="lede">每一层都能在开源代码里找到对应实现；当前进度如实标注。</p>
+      <div class="layers">
+        <div class="layer"><span class="no">L5</span><span class="name">输出层<span>学术引用 · 加密备份 · （P3）REFI-QDA 导出</span></span><span class="st">引用/备份已实现</span></div>
+        <div class="layer"><span class="no">L4</span><span class="name">分析层<span>（P3）AI 编码提案 · 三角验证 · 反身性提醒</span></span><span class="st">日志草稿已实现</span></div>
+        <div class="layer"><span class="no">L3</span><span class="name">沉淀层<span>（P2）四维索引知识库 · 引荐链图谱</span></span><span class="st">结构化登记已实现</span></div>
+        <div class="layer"><span class="no">L2</span><span class="name">取证层<span>哈希链 · 只读封存 · 可信时间 · append-only 日志</span></span><span class="st">已实现 · 核心壁垒</span></div>
+        <div class="layer"><span class="no">L1</span><span class="name">采集层<span>Inbox 导入 · 事件/访谈登记 · （Plan 3）手机端</span></span><span class="st">桌面导入流已实现</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top: 24px;">
+    <div class="wrap">
+      <p class="kicker">03 · 已实现能力</p>
+      <h2>每一项都有测试覆盖</h2>
+      <div class="grid-3">
+        <div class="cap"><b>加密资料库 Vault</b><span>SQLCipher 整库加密，口令丢失无找回，WAL + 版本迁移。</span></div>
+        <div class="cap"><b>证据链 EvidenceLog</b><span>仅可追加的链式哈希日志，数据库触发器强制拒绝 UPDATE/DELETE。</span></div>
+        <div class="cap"><b>原始件封存 Ingest</b><span>SHA-256 固化 → 原子写入 → 只读；同哈希幂等去重。</span></div>
+        <div class="cap"><b>收件箱 Inbox</b><span>监听导入目录，畸形 bundle 进隔离区，不污染主库。</span></div>
+        <div class="cap"><b>完整性校验 Verify</b><span>全链重放 + 原始件逐一重算 + 孤儿检测，出具报告。</span></div>
+        <div class="cap"><b>引用 ID RefId</b><span>可引用到录音内某一秒，一经签发永不变更。</span></div>
+        <div class="cap"><b>PIPL 删除权 Purge</b><span>按化名级联清除，确认令牌防误清，清除事实入链留痕。</span></div>
+        <div class="cap"><b>可信时间 TimeSync</b><span>NTP 校时偏移入链，时间篡改事后可检出。</span></div>
+        <div class="cap"><b>加密备份 OFBK1</b><span>scrypt + AES-256-GCM 打包加密库与全部原始件。</span></div>
+        <div class="cap"><b>每日田野日志</b><span>自动聚合当日材料为草稿，人工确认后入链。</span></div>
+        <div class="cap"><b>匿名化</b><span>真名仅存独立加密表，分析层默认只见化名。</span></div>
+        <div class="cap"><b>AI 是同事，不是先知</b><span>P1 刻意不接 AI；未来所有 AI 输出只是待确认的提案。</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="evidence" id="evidence">
+    <div class="wrap">
+      <p class="kicker">04 · 核心壁垒</p>
+      <h2>证据链：让现实留下可查证的回执</h2>
+      <p class="lede">每份材料在保存瞬间即被数学固化。任何对历史的篡改，都会导致其后所有哈希校验失败——审稿人、伦理委员会与你自己的十年后，都能验证这份材料从未被改动。</p>
+      <div class="ev-grid">
+        <div class="ev-box">
+          <h3>链式哈希 · append-only</h3>
+          <pre><span class="c"># entry_hash 计算（'|' 连接）</span>
+entry_hash = <span class="a">SHA-256</span>(seq | prev_hash | ts
+             | actor | action | payload_hash)
+
+<span class="c"># 首条 prev_hash = 64 个 '0'
+# 任何 UPDATE/DELETE 在库层即被拒绝</span></pre>
+          <p>校验时重放全链并逐一重算原始件哈希，报告首个断裂点。</p>
+        </div>
+        <div class="ev-box">
+          <h3>引用到秒 · 永不变更</h3>
+          <span class="refid">OF-20260911-KMG-001#T12:34</span>
+          <p>日期 · 城市码 · 序号 · 录音内偏移。论文引用附上 SHA-256，任何人可独立验证材料未被改动。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="principles">
+    <div class="wrap">
+      <p class="kicker">05 · 项目宪法</p>
+      <h2>六条不可妥协项</h2>
+      <p class="lede">当原则与开发速度冲突时，原则优先。完整版见 PRINCIPLES.md。</p>
+      <div class="prins">
+        <div class="prin"><b>证据链不可篡改</b><span>原始件只读封存，编辑只产生新版本。</span></div>
+        <div class="prin"><b>离线优先</b><span>田野没有信号，核心功能断网完整可用。</span></div>
+        <div class="prin"><b>对研究者严谨，对受访者无感</b><span>取证像聊天一样自然，哈希固化静默完成。</span></div>
+        <div class="prin"><b>伦理即基础设施</b><span>同意先于采集，真名静态加密，全面支持 PIPL 删除权。</span></div>
+        <div class="prin"><b>沉淀，而非堆积</b><span>原始数据不是知识，一切汇入四维索引。</span></div>
+        <div class="prin"><b>学术级交付</b><span>经不起同行评审审视的产出，不算完成。</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="roadmap" style="padding-top: 24px;">
+    <div class="wrap">
+      <p class="kicker">06 · 路线图</p>
+      <h2>先能出门干活，再谈严谨分析</h2>
+      <div class="roads">
+        <div class="road">
+          <span class="tag now">P1 · 进行中</span>
+          <h3>能出门干活</h3>
+          <p>桌面全功能端：加密库、证据链、导入流、引用、PIPL 清除、加密备份；初版五视图工作台已落地；手机轻薄端出 bundle。</p>
+        </div>
+        <div class="road">
+          <span class="tag later">P2 · 规划</span>
+          <h3>能沉淀回溯</h3>
+          <p>知识库四维索引（人物 × 地点 × 时间 × 主题）、匿名化流水线、普通话转写接入、RFC3161 可信时间戳。</p>
+        </div>
+        <div class="road">
+          <span class="tag later">P3 · 规划</span>
+          <h3>能严谨分析</h3>
+          <p>AI 编码提案（只提案、人工确认）、三角验证视图（孤证标记）、REFI-QDA 导出、反身性提醒。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="docs" style="padding-top: 24px;">
+    <div class="wrap">
+      <p class="kicker">07 · 文档</p>
+      <h2>全部文档开源可查</h2>
+      <div class="docs-list">
+        <a class="doc-link" href="https://github.com/allengaller/open-field/blob/main/PRINCIPLES.md"><b>PRINCIPLES 项目宪法</b><span>六条不可妥协项与工程标准</span></a>
+        <a class="doc-link" href="https://github.com/allengaller/open-field/blob/main/docs/ARCHITECTURE.md"><b>ARCHITECTURE 架构</b><span>as-built：证据链协议与 IPC 接口面</span></a>
+        <a class="doc-link" href="https://github.com/allengaller/open-field/blob/main/docs/THREAT_MODEL.md"><b>THREAT_MODEL 威胁模型</b><span>资产、对手与残余风险诚实清单</span></a>
+        <a class="doc-link" href="https://github.com/allengaller/open-field/blob/main/docs/USER_GUIDE.md"><b>USER_GUIDE 使用手册</b><span>从建库到引用的分步操作</span></a>
+        <a class="doc-link" href="https://github.com/allengaller/open-field/tree/main/docs/fieldwork"><b>田野调查方法论语料库</b><span>面向 IT 从业者的 12 章中文知识库</span></a>
+        <a class="doc-link" href="https://github.com/allengaller/open-field/blob/main/CITATION.cff"><b>CITATION.cff</b><span>在论文中引用 OpenField</span></a>
+      </div>
+      <p class="lede" style="margin-top: 28px; margin-bottom: 0; font-size: 14px;">研究伦理说明：OpenField 不支持任何形式的隐蔽采集，受访者数据永不用于增长。<span class="mono-ext">— PRINCIPLES §2.4 / §6</span></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="quote">「田野是理论遇见现实的地方。OpenField 的使命，是让现实留下可查证的回执。」</p>
+    <div class="meta">
+      <span>© 2026 OpenField</span>
+      <span><a href="https://github.com/allengaller/open-field">github.com/allengaller/open-field</a></span>
+      <span>MIT License</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

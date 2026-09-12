@@ -1,0 +1,77 @@
+/* Hallmark · pre-emit critique: P5 H4 E5 S4 R5 V5
+ * Hallmark · genre: modern-minimal · macrostructure: Workbench · theme: Cobalt · enrichment: none (verify graphite card = the theme's one dark beat)
+ * nav: app-rail (adapted from N3 side-rail for a live application shell) · footer: status bar (Ft2 inline vocabulary)
+ * tone: professional tool platform · audience: field researcher (solo use, demos, collaborator recruiting)
+ * axes: paper=cool light L98.5 / display=grotesk-sans (Space Grotesk) / accent=electric cobalt oklch(58% 0.20 256)
+ */
+:root {
+  /* ── Cobalt palette (cool, hue ~250) ── */
+  --color-paper:        oklch(98.5% 0.004 250);
+  --color-paper-2:      oklch(96.2% 0.006 250);
+  --color-paper-3:      oklch(94% 0.007 250);
+  --color-rule:         oklch(91% 0.006 250);
+  --color-rule-2:       oklch(85.5% 0.009 250);
+  --color-muted:        oklch(51% 0.014 255);
+  --color-neutral:      oklch(42% 0.016 256);
+  --color-ink-2:        oklch(34% 0.018 257);
+  --color-ink:          oklch(24% 0.02 258);
+
+  --color-accent:       oklch(58% 0.2 256);
+  --color-accent-hover: oklch(54% 0.2 256);
+  --color-accent-ink:   oklch(99% 0.002 250);
+  --color-accent-soft:  oklch(94.5% 0.024 256);
+  --color-focus:        oklch(58% 0.2 256);
+
+  --color-error:        oklch(55% 0.19 27);
+  --color-error-soft:   oklch(95% 0.022 27);
+  --color-success:      oklch(56% 0.13 152);
+  --color-success-soft: oklch(95% 0.03 152);
+
+  /* ── Graphite (the one dark surface: verify report) ── */
+  --color-graphite:       oklch(22% 0.016 260);
+  --color-graphite-2:     oklch(26% 0.017 260);
+  --color-graphite-ink:   oklch(93% 0.006 250);
+  --color-graphite-muted: oklch(68% 0.012 254);
+
+  /* ── Type ── */
+  --font-display: 'Space Grotesk', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-body: 'Inter', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+  --text-xs:   0.6875rem;  /* 11px — mono meta */
+  --text-sm:   0.8125rem;  /* 13px — labels, meta */
+  --text-base: 0.875rem;   /* 14px — UI body */
+  --text-md:   1rem;       /* 16px — lede */
+  --text-lg:   1.25rem;    /* 20px — view titles */
+  --text-xl:   1.5625rem;  /* 25px — numerals */
+
+  /* ── Space (4pt) ── */
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs:  0.5rem;
+  --space-sm:  0.75rem;
+  --space-md:  1rem;
+  --space-lg:  1.5rem;
+  --space-xl:  2rem;
+  --space-2xl: 3rem;
+
+  /* ── Radii ── */
+  --radius-ctl: 6px;
+  --radius-panel: 10px;
+
+  /* ── Motion ── */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 200ms;
+  --dur-long: 300ms;
+
+  /* ── Depth / elevation ── */
+  --z-base: 1;
+  --z-raised: 10;
+  --z-sticky: 200;
+  --z-toast: 500;
+
+  --shadow-lift: 0 1px 2px oklch(24% 0.02 258 / 0.05);
+}

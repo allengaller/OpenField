@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3-multiple-ciphers';
-import { computePayloadHash, makeRefId } from '@openfield/core';
+import { computePayloadHash, makeRefId, type ArtifactType, type ConsentTemplateType } from '@openfield/core';
 import AdmZip from 'adm-zip';
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -9,10 +9,18 @@ import { getArtifact, getEncounter, getFieldEvent, setArtifactRefId, type Artifa
 import { backupVault, type VaultPaths } from './vault';
 
 export class ExportError extends Error {
-  constructor(readonly code: 'no-encounter' | 'no-event' | 'io', message: string) {
+  constructor(readonly code: 'no-encounter' | 'no-event' | 'no-consent' | 'io', message: string) {
     super(message);
   }
 }
+
+// 引用前置的知情同意门禁：对研究者严谨（§2.1），对受访者无感（§2.3）。
+// 采集与封存永不拦截（录音发生在系统之外，拦截只能伤及真实田野）；
+// 但签发学术引用时，可被引用的材料必须存在相应且未撤回的同意记录。
+const REQUIRED_CONSENT: Partial<Record<ArtifactType, ConsentTemplateType>> = {
+  audio: 'recording',
+  photo: 'portrait',
+};
 
 export function makeCitation(
   db: Database.Database,
@@ -24,6 +32,20 @@ export function makeCitation(
   if (!artifact.encounterId) throw new ExportError('no-encounter', '采集物未挂访谈，无法定位引用时间与城市');
   const encounter = getEncounter(db, artifact.encounterId);
   if (!encounter) throw new ExportError('no-encounter', `encounter 不存在：${artifact.encounterId}`);
+
+  const required = REQUIRED_CONSENT[artifact.type];
+  if (required) {
+    const hasConsent = db
+      .prepare('SELECT 1 FROM consent_records WHERE encounter_id = ? AND template_type = ? AND withdrawn_at IS NULL LIMIT 1')
+      .get(encounter.id, required);
+    if (!hasConsent) {
+      throw new ExportError(
+        'no-consent',
+        `该访谈尚无有效知情同意（${artifact.type} 类型材料需「${required}」类同意且未撤回），无法签发引用——请先记录同意书`,
+      );
+    }
+  }
+
   const event = getFieldEvent(db, encounter.eventId);
   if (!event) throw new ExportError('no-event', `event 不存在：${encounter.eventId}`);
 

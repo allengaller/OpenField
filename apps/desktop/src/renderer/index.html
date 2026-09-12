@@ -2,48 +2,347 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:"
+    />
     <title>OpenField</title>
   </head>
   <body>
-    <h1>OpenField P1 控制台</h1>
-    <section>
-      <h2>Vault</h2>
-      <input id="pass" type="password" placeholder="口令（≥8 字符）" />
-      <button id="btn-create">创建 vault</button>
-      <button id="btn-open">解锁</button>
-      <button id="btn-status">状态</button>
-      <pre id="status">locked</pre>
-    </section>
-    <section>
-      <h2>登记</h2>
-      <input id="ev-id" placeholder="事件 ID（evt-1）" />
-      <input id="ev-date" placeholder="日期 2026-09-11" />
-      <input id="ev-city" placeholder="城市码 KMG" />
-      <input id="ev-loc" placeholder="地点名称" />
-      <button id="btn-event">创建事件</button>
-      <br />
-      <input id="enc-id" placeholder="访谈 ID（enc-1）" />
-      <input id="enc-event" placeholder="所属事件 ID（evt-1）" />
-      <input id="enc-participant" placeholder="受访者笔名（P01）" />
-      <input id="enc-reason" placeholder="抽样理由" />
-      <button id="btn-encounter">创建访谈</button>
-    </section>
-    <section>
-      <h2>Inbox</h2>
-      <button id="btn-scan">扫描</button>
-      <pre id="scan"></pre>
-      <input id="confirm-enc" placeholder="归入访谈 ID（enc-1）" />
-      <ul id="pending"></ul>
-    </section>
-    <section>
-      <h2>校验与引用</h2>
-      <button id="btn-verify">运行校验</button>
-      <pre id="report"></pre>
-      <input id="cite-art" placeholder="采集物 ID" />
-      <button id="btn-cite">生成引用</button>
-      <pre id="cite-out"></pre>
-    </section>
+    <div class="app">
+      <nav class="rail" aria-label="主导航">
+        <div class="brand">
+          <div class="brand__name">OpenField</div>
+          <div class="brand__sub">Fieldwork OS</div>
+        </div>
+        <div class="rail__nav" role="tablist" aria-label="工作区">
+          <button class="rail__link is-active" id="nav-overview" data-view="overview" data-glyph="概" role="tab" aria-selected="true"><span>概览</span></button>
+          <button class="rail__link" id="nav-register" data-view="register" data-glyph="登" role="tab" aria-selected="false"><span>采集登记</span></button>
+          <button class="rail__link" id="nav-inbox" data-view="inbox" data-glyph="收" role="tab" aria-selected="false"><span>收件箱</span></button>
+          <button class="rail__link" id="nav-verify" data-view="verify" data-glyph="证" role="tab" aria-selected="false"><span>证据链</span></button>
+          <button class="rail__link" id="nav-archive" data-view="archive" data-glyph="档" role="tab" aria-selected="false"><span>档案库</span></button>
+        </div>
+        <div class="rail__foot">
+          <div class="vault-chip"><span class="vault-chip__dot" id="vault-dot"></span><span id="vault-chip-text">LOCKED</span></div>
+          <a class="rail__ext" href="https://github.com/allengaller/me-os" target="_blank" rel="noopener">me-os ↗</a>
+        </div>
+      </nav>
+
+      <div class="main">
+        <div class="main__scroll">
+          <div class="viewwrap">
+            <pre class="readout" id="status" role="status" aria-live="polite"></pre>
+
+            <!-- 概览 -->
+            <section class="view is-active" id="view-overview" role="tabpanel" aria-label="概览">
+              <header class="viewhead">
+                <h2>概览</h2>
+                <p>资料库状态与当日采集量。田野中的一切写入都先经过这里确认。</p>
+              </header>
+              <div class="stats">
+                <div class="stat"><span class="stat__num" id="stat-events">0</span><span class="stat__label">事件</span></div>
+                <div class="stat"><span class="stat__num" id="stat-encounters">0</span><span class="stat__label">访谈</span></div>
+                <div class="stat"><span class="stat__num" id="stat-inbox">0</span><span class="stat__label">待入库</span></div>
+              </div>
+              <section class="panel">
+                <h3>资料库</h3>
+                <p class="panel__hint">口令至少 8 个字符。资料库以 SQLCipher 加密，原始件只读封存。</p>
+                <div class="formgrid">
+                  <div class="field">
+                    <label class="field__label" for="pass">口令</label>
+                    <input class="input" id="pass" type="password" placeholder="≥ 8 字符" autocomplete="off" />
+                    <p class="field__help">解锁或创建时使用</p>
+                  </div>
+                </div>
+                <div class="rows__actions">
+                  <button class="btn btn--primary" id="btn-create">创建资料库</button>
+                  <button class="btn" id="btn-open">解锁</button>
+                  <button class="btn" id="btn-status">刷新状态</button>
+                  <button class="btn" id="btn-backup">导出备份</button>
+                  <button class="btn" id="btn-timesync">时间同步</button>
+                </div>
+              </section>
+              <section class="panel">
+                <h3>演示数据</h3>
+                <p class="panel__hint">
+                  一套可编辑的示例田野数据（3 个事件 · 5 位受访者 · 5 条访谈 · 6 份采集物 · 同意书与备忘录）。
+                  全部走真实入库路径，哈希链可校验；改 <code>apps/desktop/src/main/services/mock-data.ts</code> 即可改内容。
+                  清除只删演示行与文件，证据链日志按 append-only 铁律保留。
+                </p>
+                <div class="tagrow"><span class="tag" id="mock-status">未载入</span></div>
+                <div class="rows__actions">
+                  <button class="btn btn--primary" id="btn-mock-load">载入演示数据</button>
+                  <button class="btn btn--danger-quiet" id="btn-mock-clear">清除演示数据</button>
+                </div>
+              </section>
+              <section class="panel">
+                <h3>危险区 · 单人数据全链路清除</h3>
+                <p class="panel__hint">
+                  PIPL 合规：受访者有权要求删除。输入笔名并重复确认，将不可逆清除 TA 的访谈、同意书、采集物与关联备忘录（原始件文件一并销毁），清除动作本身作为 PURGE_SUBJECT 条目永久留痕。此操作无法撤销。
+                </p>
+                <div class="formgrid">
+                  <div class="field">
+                    <label class="field__label" for="purge-pseudonym">受访者笔名</label>
+                    <input class="input" id="purge-pseudonym" placeholder="P-001" autocomplete="off" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="purge-confirm">重复输入笔名以确认</label>
+                    <input class="input" id="purge-confirm" placeholder="再次输入 P-001" autocomplete="off" />
+                    <p class="field__help">两次输入必须完全一致</p>
+                  </div>
+                </div>
+                <div class="rows__actions"><button class="btn btn--danger-quiet" id="btn-purge">清除该受访者全部数据</button></div>
+              </section>
+            </section>
+
+            <!-- 采集登记 -->
+            <section class="view" id="view-register" role="tabpanel" aria-label="采集登记">
+              <header class="viewhead">
+                <h2>采集登记</h2>
+                <p>每次田野活动登记为一个事件；事件下的每次交流登记为一条访谈。登记先于采集，证据链才有锚点。</p>
+              </header>
+              <section class="panel">
+                <h3>事件</h3>
+                <div class="formgrid">
+                  <div class="field">
+                    <label class="field__label" for="ev-id">事件 ID</label>
+                    <input class="input" id="ev-id" placeholder="evt-1" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="ev-date">日期</label>
+                    <input class="input" id="ev-date" placeholder="2026-09-11" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="ev-city">城市码</label>
+                    <input class="input" id="ev-city" placeholder="KMG" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="ev-loc">地点名称</label>
+                    <input class="input" id="ev-loc" placeholder="昆明篆新市场" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="ev-note">背景注记</label>
+                    <input class="input" id="ev-note" placeholder="开市时段、摊位分布等现场背景" />
+                    <p class="field__help"></p>
+                  </div>
+                </div>
+                <div class="rows__actions"><button class="btn btn--primary" id="btn-event">登记事件</button></div>
+              </section>
+              <section class="panel">
+                <h3>访谈</h3>
+                <div class="formgrid">
+                  <div class="field">
+                    <label class="field__label" for="enc-id">访谈 ID</label>
+                    <input class="input" id="enc-id" placeholder="enc-1" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="enc-event">所属事件 ID</label>
+                    <input class="input" id="enc-event" placeholder="evt-1" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="enc-participant">受访者笔名</label>
+                    <input class="input" id="enc-participant" placeholder="P01" />
+                    <p class="field__help">分析层只见笔名，真名单独加密存放</p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="enc-reason">抽样理由</label>
+                    <input class="input" id="enc-reason" placeholder="目的性抽样：摊主从业 10 年以上" />
+                    <p class="field__help">抽样逻辑本身是研究资料</p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="enc-note">备注</label>
+                    <input class="input" id="enc-note" placeholder="现场情况、语言、氛围等" />
+                    <p class="field__help"></p>
+                  </div>
+                </div>
+                <div class="rows__actions"><button class="btn btn--primary" id="btn-encounter">登记访谈</button></div>
+              </section>
+              <section class="panel">
+                <h3>受访者建档</h3>
+                <p class="panel__hint">笔名是分析层唯一身份标识；引荐链记录滚雪球抽样路径，同意范围决定素材可用边界。</p>
+                <div class="formgrid">
+                  <div class="field">
+                    <label class="field__label" for="pt-pseudonym">笔名</label>
+                    <input class="input" id="pt-pseudonym" placeholder="P-006" />
+                    <p class="field__help">已存在则更新档案</p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="pt-industry">行业 / 身份</label>
+                    <input class="input" id="pt-industry" placeholder="菌子零售摊主" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="pt-region">地区</label>
+                    <input class="input" id="pt-region" placeholder="云南·昆明" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="pt-referral">引荐链</label>
+                    <input class="input" id="pt-referral" placeholder="P-001, P-002" />
+                    <p class="field__help">谁把 TA 介绍给你，按顺序，逗号分隔</p>
+                  </div>
+                </div>
+                <div class="field">
+                  <span class="field__label">同意范围</span>
+                  <div class="tagrow">
+                    <label class="tagrow"><input type="checkbox" id="pt-scope-recording" /> 录音</label>
+                    <label class="tagrow"><input type="checkbox" id="pt-scope-portrait" /> 肖像</label>
+                    <label class="tagrow"><input type="checkbox" id="pt-scope-publication" /> 发表</label>
+                  </div>
+                  <p class="field__help">勾选即记入档案，可随时更新</p>
+                </div>
+                <div class="rows__actions"><button class="btn btn--primary" id="btn-participant">建档 / 更新</button></div>
+                <div class="field" style="margin-top: 18px; border-top: 1px solid var(--rule); padding-top: 14px;">
+                  <label class="field__label" for="pt-real-name">真名映射（仅加密库存储，分析层不可见，不入证据链）</label>
+                  <div class="tagrow">
+                    <input class="input" id="pt-real-name" placeholder="贵姓大名（可不填，填了也绝不入库到分析层）" style="flex: 1;" />
+                    <button class="btn" id="btn-real-name">记录真名</button>
+                  </div>
+                  <p class="field__help">PIPL 视角：受访者要求删除时，清除流程会连同此表一并删除</p>
+                </div>
+              </section>
+              <section class="panel">
+                <h3>知情同意</h3>
+                <p class="panel__hint">每份同意书单独留痕，范围说明会随证据链一起存证；受访者可随时撤回。</p>
+                <div class="formgrid">
+                  <div class="field">
+                    <label class="field__label" for="consent-enc">访谈 ID</label>
+                    <input class="input" id="consent-enc" placeholder="enc-1" />
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="consent-type">同意类型</label>
+                    <select class="input" id="consent-type">
+                      <option value="recording">录音</option>
+                      <option value="portrait">肖像</option>
+                      <option value="publication">发表</option>
+                    </select>
+                    <p class="field__help"></p>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="consent-scope">范围说明</label>
+                    <input class="input" id="consent-scope" placeholder="仅用于学术研究" />
+                    <p class="field__help"></p>
+                  </div>
+                </div>
+                <div class="rows__actions"><button class="btn btn--primary" id="btn-consent">记录同意</button></div>
+              </section>
+            </section>
+
+            <!-- 收件箱 -->
+            <section class="view" id="view-inbox" role="tabpanel" aria-label="收件箱">
+              <header class="viewhead">
+                <h2>收件箱</h2>
+                <p>资料库 home 的 inbox 目录被持续监视。新文件进入待定区，确认后哈希固化、原始件封存。</p>
+              </header>
+              <section class="panel">
+                <div class="rows__actions">
+                  <button class="btn btn--primary" id="btn-scan">扫描 inbox</button>
+                </div>
+                <pre class="readout-block" id="scan"></pre>
+                <div class="field">
+                  <label class="field__label" for="confirm-enc">归入访谈 ID</label>
+                  <input class="input" id="confirm-enc" placeholder="enc-1" />
+                  <p class="field__help">确认入库时填写的访谈将作为素材归属</p>
+                </div>
+                <ul class="rows" id="pending"></ul>
+              </section>
+            </section>
+
+            <!-- 证据链 -->
+            <section class="view" id="view-verify" role="tabpanel" aria-label="证据链">
+              <header class="viewhead">
+                <h2>证据链</h2>
+                <p>校验整条 append-only 哈希链，并为任意采集物生成可被审稿人验证的学术引用。</p>
+              </header>
+              <section class="panel">
+                <div class="rows__actions"><button class="btn btn--primary" id="btn-verify">运行校验</button></div>
+                <div class="graphite">
+                  <div class="graphite__head"><span>Verify report</span><span class="graphite__chip" id="verify-chip"></span></div>
+                  <pre id="report"></pre>
+                </div>
+                <div class="graphite">
+                  <div class="graphite__head"><span>Evidence log</span><span class="graphite__chip" id="evlog-chip"></span></div>
+                  <pre id="evlog"></pre>
+                </div>
+              </section>
+              <section class="panel">
+                <h3>生成引用</h3>
+                <p class="panel__hint">引用格式 OF-日期-城市码-序号#T时刻，含证据哈希，可精确到录音的某分某秒。</p>
+                <div class="formgrid">
+                  <div class="field">
+                    <label class="field__label" for="cite-art">采集物 ID</label>
+                    <input class="input" id="cite-art" placeholder="art-…" />
+                    <p class="field__help">确认入库后自动填入最近一条</p>
+                  </div>
+                </div>
+                <div class="cite-out">
+                  <button class="btn btn--primary" id="btn-cite">生成引用</button>
+                  <span class="cite-out__id" id="cite-out"></span>
+                  <button class="btn btn--sm" id="btn-cite-copy">复制</button>
+                </div>
+              </section>
+            </section>
+
+            <!-- 档案库 -->
+            <section class="view" id="view-archive" role="tabpanel" aria-label="档案库">
+              <header class="viewhead">
+                <h2>档案库</h2>
+                <p>按事件 → 访谈 → 采集物回看全部沉淀。复盘与审查都从这里进入。</p>
+              </header>
+              <section class="panel">
+                <div class="rows__actions">
+                  <button class="btn" id="btn-archive-refresh">刷新档案</button>
+                  <button class="btn" id="btn-journal">生成当日田野日志</button>
+                </div>
+                <div class="archive">
+                  <div class="archive__col">
+                    <span class="archive__label">事件</span>
+                    <ul class="selectlist" id="ar-events"></ul>
+                  </div>
+                  <div class="archive__col">
+                    <span class="archive__label">访谈</span>
+                    <ul class="selectlist" id="ar-encounters"></ul>
+                  </div>
+                  <div class="archive__col">
+                    <span class="archive__label">采集物</span>
+                    <ul class="selectlist" id="ar-artifacts"></ul>
+                  </div>
+                </div>
+                <div class="detail" id="ar-detail" hidden>
+                  <div class="detail__col">
+                    <span class="archive__label">受访者</span>
+                    <div class="detail__body" id="ar-participant"></div>
+                  </div>
+                  <div class="detail__col">
+                    <span class="archive__label">知情同意</span>
+                    <div class="detail__body" id="ar-consents"></div>
+                  </div>
+                  <div class="detail__col detail__col--wide">
+                    <span class="archive__label">备忘录</span>
+                    <div class="detail__body" id="ar-memos"></div>
+                  </div>
+                </div>
+              </section>
+            </section>
+          </div>
+        </div>
+
+        <footer class="statusbar">
+          <span id="sb-home">—</span>
+          <span class="statusbar__right"><span id="sb-state">LOCKED</span></span>
+        </footer>
+      </div>
+    </div>
+
+    <div class="toasts" id="toasts"></div>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

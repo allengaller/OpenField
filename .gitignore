@@ -10,6 +10,10 @@ coverage/
 # Session / tooling artifacts
 .qoder/
 
+# Meoo deploy binding (per-directory project binding)
+.env
+website/.env
+
 # Downloaded third-party reference files (personal-use only, see references/INDEX.md)
 docs/fieldwork/references/*.pdf
 docs/fieldwork/references/*.txt

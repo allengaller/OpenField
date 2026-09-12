@@ -2,8 +2,8 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { Encounter, FieldEvent, verifyChain } from '@openfield/core';
 import { cleanupTestVault, makeTestVault } from './helpers';
 import { listEvidenceEntries } from '../src/main/services/evidence';
-import { listMemos } from '../src/main/services/repos';
-import { buildDailyJournal, confirmMemoWithEntry, createEncounterWithEntry, createEventWithEntry } from '../src/main/services/registry';
+import { insertConsentRecord, listMemos } from '../src/main/services/repos';
+import { buildDailyJournal, confirmMemoWithEntry, createEncounterWithEntry, createEventWithEntry, withdrawConsentWithEntry } from '../src/main/services/registry';
 
 const { db, home } = makeTestVault();
 afterAll(() => cleanupTestVault(home));
@@ -47,5 +47,21 @@ describe('registry', () => {
     expect(confirmed.confirmedAt).toBe(1757462500000);
     expect(entry.action).toBe('MEMO_CONFIRM');
     expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+  });
+
+  it('withdrawConsentWithEntry：撤回落库 + CONSENT_WITHDRAW 入链；重复撤回与未知 ID 拒绝', () => {
+    insertConsentRecord(db, {
+      id: 'consent-1',
+      encounterId: 'enc-1',
+      templateType: 'recording',
+      scope: '仅用于学术研究',
+      withdrawnAt: null,
+    });
+    const { consent, entry } = withdrawConsentWithEntry(db, 'consent-1', { ts: 1757462600000 });
+    expect(consent.withdrawnAt).toBe(1757462600000);
+    expect(entry.action).toBe('CONSENT_WITHDRAW');
+    expect(verifyChain(listEvidenceEntries(db)).ok).toBe(true);
+    expect(() => withdrawConsentWithEntry(db, 'consent-1')).toThrow(/已撤回/);
+    expect(() => withdrawConsentWithEntry(db, 'consent-nope')).toThrow(/不存在/);
   });
 });

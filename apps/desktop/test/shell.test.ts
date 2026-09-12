@@ -53,6 +53,8 @@ describe('createIpcHandlers 端到端（main 进程同款调用序列）', () =>
 
     expect(await h['events:create']({ id: 'evt-1', date: '2026-09-11', cityCode: 'KMG', locationName: '篆新市场' })).toMatchObject({ ok: true });
     expect(await h['encounters:create']({ id: 'enc-1', eventId: 'evt-1', participantRef: 'P01', samplingReason: '目的性抽样', startedAt: Date.now() })).toMatchObject({ ok: true });
+    // 引用门禁：录音材料需有效 recording 同意
+    expect(await h['consents:record']({ encounterId: 'enc-1', templateType: 'recording', scope: '学术研究' })).toMatchObject({ ok: true });
 
     writeFileSync(join(state.paths.inboxDir, 'rec.wav'), Buffer.from('S'.repeat(128)));
     const scan = await h['inbox:scan'](undefined);

@@ -112,6 +112,7 @@ describe('Participant 隐私边界', () => {
 describe('EvidenceAction', () => {
   it('接受新增的 CREATE_PARTICIPANT 与 CREATE_MEMO', () => {
     expect(EvidenceAction.parse('CREATE_PARTICIPANT')).toBe('CREATE_PARTICIPANT');
+    expect(EvidenceAction.parse('CONSENT_WITHDRAW')).toBe('CONSENT_WITHDRAW');
     expect(EvidenceAction.parse('CREATE_MEMO')).toBe('CREATE_MEMO');
   });
   it('拒绝未定义的 action', () => {

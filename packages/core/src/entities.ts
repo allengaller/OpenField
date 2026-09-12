@@ -18,6 +18,7 @@ export const EvidenceAction = z.enum([
   'CREATE_EVENT',
   'CREATE_ENCOUNTER',
   'CONSENT_RECORDED',
+  'CONSENT_WITHDRAW',
   'MEMO_CONFIRM',
   'CREATE_PARTICIPANT',
   'CREATE_MEMO',

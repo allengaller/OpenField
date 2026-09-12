@@ -14,6 +14,21 @@ export const IPC_CHANNELS = [
   'citation:make',
   'purge:subject',
   'backup:export',
+  'archive:events',
+  'archive:encounters',
+  'archive:artifacts',
+  'archive:detail',
+  'evidence:list',
+  'memos:confirm',
+  'journals:build',
+  'participants:upsert',
+  'participants:set-real-name',
+  'consents:record',
+  'consents:withdraw',
+  'time:sync',
+  'mock:load',
+  'mock:clear',
+  'mock:status',
 ] as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[number];

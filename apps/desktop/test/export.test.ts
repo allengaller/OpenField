@@ -3,11 +3,11 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
-import { Encounter, FieldEvent, verifyChain } from '@openfield/core';
+import { ConsentRecord, Encounter, FieldEvent, verifyChain } from '@openfield/core';
 import { cleanupTestVault, makeTestVault, TEST_PASSPHRASE } from './helpers';
 import { ingestFile } from '../src/main/services/ingest';
 import { listEvidenceEntries } from '../src/main/services/evidence';
-import { insertEncounter, insertFieldEvent } from '../src/main/services/repos';
+import { insertConsentRecord, insertEncounter, insertFieldEvent, withdrawConsent } from '../src/main/services/repos';
 import { ExportError, exportBackup, makeCitation, readBackup } from '../src/main/services/export';
 
 const { db, paths, home } = makeTestVault();
@@ -18,6 +18,11 @@ beforeAll(async () => {
   insertFieldEvent(db, FieldEvent.parse({ id: 'evt-1', date: '2026-09-09', cityCode: 'KMG', locationName: '斗南花市' }));
   insertEncounter(db, Encounter.parse({ id: 'enc-1', eventId: 'evt-1', participantRef: 'P01', samplingReason: '关键知情人', startedAt: T0 }));
   insertEncounter(db, Encounter.parse({ id: 'enc-2', eventId: 'evt-1', participantRef: 'P02', samplingReason: '对照样本', startedAt: T0 }));
+  insertEncounter(db, Encounter.parse({ id: 'enc-3', eventId: 'evt-1', participantRef: 'P03', samplingReason: '门禁用例（无同意）', startedAt: T0 }));
+  insertEncounter(db, Encounter.parse({ id: 'enc-4', eventId: 'evt-1', participantRef: 'P04', samplingReason: '撤回用例', startedAt: T0 }));
+  // 引用门禁：enc-1/enc-2 有有效录音同意，其余无
+  insertConsentRecord(db, ConsentRecord.parse({ id: 'consent-enc1', encounterId: 'enc-1', templateType: 'recording', scope: '仅用于学术研究' }));
+  insertConsentRecord(db, ConsentRecord.parse({ id: 'consent-enc2', encounterId: 'enc-2', templateType: 'recording', scope: '仅用于学术研究' }));
 });
 
 afterAll(() => {
@@ -25,11 +30,16 @@ afterAll(() => {
   cleanupTestVault(home);
 });
 
-async function ingestFixture(name: string, capturedAt?: number, encounterId?: string) {
+async function ingestFixture(
+  name: string,
+  capturedAt?: number,
+  encounterId?: string,
+  opts: { type?: 'audio' | 'photo' | 'doc'; mime?: string } = {},
+) {
   const src = join(fixDir, name);
   writeFileSync(src, name);
   return ingestFile(db, paths.originalsRoot, {
-    sourcePath: src, mime: 'audio/wav', type: 'audio', deviceId: 'desktop',
+    sourcePath: src, mime: opts.mime ?? 'audio/wav', type: opts.type ?? 'audio', deviceId: 'desktop',
     ...(capturedAt !== undefined ? { capturedAt } : {}),
     ...(encounterId !== undefined ? { encounterId } : {}),
   });
@@ -68,6 +78,27 @@ describe('makeCitation', () => {
     const second = makeCitation(db, { artifactId: r.artifact.id, actor: 'desktop' });
     expect(second.refId).toBe(first.refId);
     expect(listEvidenceEntries(db).length).toBe(chainLen);
+  });
+
+  it('同意门禁：audio 无有效 recording 同意 → no-consent 拒绝', async () => {
+    const r = await ingestFixture('g1.wav', T0 + 60_000, 'enc-3');
+    expect(() => makeCitation(db, { artifactId: r.artifact.id, actor: 'desktop' })).toThrow(/知情同意/);
+  });
+
+  it('同意门禁：photo 需 portrait 同意，recording 不能替代；补记后放行', async () => {
+    const r = await ingestFixture('g2.jpg', T0 + 60_000, 'enc-3', { type: 'photo', mime: 'image/jpeg' });
+    expect(() => makeCitation(db, { artifactId: r.artifact.id, actor: 'desktop' })).toThrow(/知情同意/);
+    insertConsentRecord(db, ConsentRecord.parse({ id: 'consent-g2', encounterId: 'enc-3', templateType: 'portrait', scope: '论文插图' }));
+    expect(makeCitation(db, { artifactId: r.artifact.id, actor: 'desktop' }).refId).toMatch(/^OF-/);
+  });
+
+  it('同意门禁：撤回后的同意立即失效，doc/note 类材料不受门禁限制', async () => {
+    insertConsentRecord(db, ConsentRecord.parse({ id: 'consent-g3', encounterId: 'enc-4', templateType: 'recording', scope: '仅用于学术研究' }));
+    withdrawConsent(db, 'consent-g3', T0 + 200_000);
+    const audio = await ingestFixture('g3.wav', T0 + 60_000, 'enc-4');
+    expect(() => makeCitation(db, { artifactId: audio.artifact.id, actor: 'desktop' })).toThrow(/知情同意/);
+    const note = await ingestFixture('g4.md', T0 + 60_000, 'enc-4', { type: 'doc', mime: 'text/markdown' });
+    expect(makeCitation(db, { artifactId: note.artifact.id, actor: 'desktop' }).refId).toMatch(/^OF-/);
   });
 });
 

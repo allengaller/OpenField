@@ -1,9 +1,9 @@
 import type Database from 'better-sqlite3-multiple-ciphers';
-import { computePayloadHash, Encounter, FieldEvent, type EvidenceEntry, type Memo } from '@openfield/core';
+import { computePayloadHash, Encounter, FieldEvent, type ConsentRecord, type EvidenceEntry, type Memo } from '@openfield/core';
 import { appendEntry } from './evidence';
 import {
   confirmMemo, insertEncounter, insertFieldEvent, insertMemo, listArtifacts, listArtifactsByEncounter,
-  listEncountersByEvent, listFieldEvents, listMemos,
+  listEncountersByEvent, listFieldEvents, listMemos, getConsentRecord, withdrawConsent,
 } from './repos';
 
 export function createEventWithEntry(
@@ -104,6 +104,27 @@ export function confirmMemoWithEntry(
     const memo = confirmMemo(db, memoId, confirmedAt);
     const entry = appendEntry(db, { ts: confirmedAt, actor: 'desktop', action: 'MEMO_CONFIRM', payloadHash: computePayloadHash(memo) });
     return { memo, entry };
+  });
+  return tx();
+}
+
+// 同意撤回：改动与链条目同事务；载荷为撤回后的完整同意记录（不含受访者身份字段）。
+// 撤回后引用门禁即刻生效（makeCitation 只认未撤回的同类型同意）。
+export function withdrawConsentWithEntry(
+  db: Database.Database,
+  consentId: string,
+  opts: { ts?: number } = {},
+): { consent: ConsentRecord; entry: EvidenceEntry } {
+  const ts = opts.ts ?? Date.now();
+  const tx = db.transaction((): { consent: ConsentRecord; entry: EvidenceEntry } => {
+    const existing = getConsentRecord(db, consentId);
+    if (!existing) throw new Error(`ConsentRecord 不存在：${consentId}`);
+    if (existing.withdrawnAt !== null) throw new Error(`同意已撤回，不可重复撤回：${consentId}`);
+    withdrawConsent(db, consentId, ts);
+    const consent = getConsentRecord(db, consentId);
+    if (!consent) throw new Error(`ConsentRecord 不存在：${consentId}`);
+    const entry = appendEntry(db, { ts, actor: 'desktop', action: 'CONSENT_WITHDRAW', payloadHash: computePayloadHash(consent) });
+    return { consent, entry };
   });
   return tx();
 }
